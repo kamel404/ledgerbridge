@@ -1,8 +1,22 @@
 {
   "name": "ledgerbridge",
   "private": true,
+  "description": "Integration hub syncing billing and procurement apps into an ERP",
   "workspaces": [
-    "apps/*",
-    "packages/*"
-  ]
+    "packages/*",
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build:shared": "npm run build -w @ledgerbridge/shared",
+    "build": "npm run build:shared && npm run build -w mock-erp -w integration-service",
+    "build:lambda": "npm run build:shared && npm run build:lambda -w mock-erp -w integration-service",
+    "typecheck": "npm run build:shared && npm run typecheck --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "test": "npm run build:shared && npm run test --workspaces --if-present",
+    "test:e2e": "npm run build:shared && npm run test:e2e --workspaces --if-present",
+    "invoke:lambda": "node --no-deprecation scripts/invoke-lambda.mjs"
+  }
 }

@@ -45,3 +45,4 @@ Desktop.ini
 .cache/
 tmp/
 *.local
+dist-lambda/
