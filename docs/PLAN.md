@@ -171,22 +171,22 @@ The scaffold was generated with newer defaults than the spec assumes. We keep th
 ### Tasks
 
 **Shared package**
-- [ ] Event envelope schema (`id`, `type`, `occurredAt`, `data`)
-- [ ] Schemas for `invoice.created`, `payment.received`, `bill.approved` (copy the shapes from SPEC §6)
-- [ ] Shared types: `SyncStatus`, `Flow` (`O2C`/`P2P`), `Source`, `ErrorClass` (`retryable`/`permanent`)
-- [ ] Schema tests: valid samples pass, broken ones fail with a useful message
+- [x] Event envelope schema (`id`, `type`, `occurredAt`, `data`)
+- [x] Schemas for `invoice.created`, `payment.received`, `bill.approved` (copy the shapes from SPEC §6)
+- [x] Shared types: `SyncStatus`, `Flow` (`O2C`/`P2P`), `Source`, `ErrorClass` (`retryable`/`permanent`)
+- [x] Schema tests: valid samples pass, broken ones fail with a useful message
 
 **Mock ERP**
-- [ ] `RecordStore` interface + in-memory version with a counter per record type
-- [ ] `POST /services/rest/auth/oauth2/v1/token`: checks client ID/secret, returns a signed JWT (`expires_in: 3600`)
-- [ ] Auth guard: every other route returns `401` without a valid token
-- [ ] Record API for `customer`, `vendor`, `invoice`, `customerPayment`, `vendorBill`: POST (204 + `Location`), GET by id, GET `eid:`, PATCH, PUT `eid:` (upsert), DELETE
-- [ ] Rules: `externalId` unique per type (POST duplicate → 400); references accept `{id}` or `{externalId}` and a missing target → 400 `INVALID_REFERENCE`
-- [ ] NetSuite-style error body (`type`, `title`, `status`, `o:errorDetails`) from one exception filter
-- [ ] Invoice money: `total`, `amountPaid`, `amountRemaining`, `status` (`open`/`paidInFull`); saving a `customerPayment` updates its invoice
-- [ ] SuiteQL endpoint: tokenizer + parser for the grammar in SPEC §7.3, `limit`/`offset`, response with `items`, `count`, `offset`, `totalResults`, `hasMore`
-- [ ] Chaos: `CHAOS_ERROR_RATE` (random 503s), `CHAOS_LATENCY_MS`, a rate limit returning 429 + `Retry-After`
-- [ ] Tests: parser (valid and rejected queries), upsert twice = one record, payment updates invoice balance
+- [x] `RecordStore` interface + in-memory version with a counter per record type
+- [x] `POST /services/rest/auth/oauth2/v1/token`: checks client ID/secret, returns a signed JWT (`expires_in: 3600`)
+- [x] Auth guard: every other route returns `401` without a valid token
+- [x] Record API for `customer`, `vendor`, `invoice`, `customerPayment`, `vendorBill`: POST (204 + `Location`), GET by id, GET `eid:`, PATCH, PUT `eid:` (upsert), DELETE
+- [x] Rules: `externalId` unique per type (POST duplicate → 400); references accept `{id}` or `{externalId}` and a missing target → 400 `INVALID_REFERENCE`
+- [x] NetSuite-style error body (`type`, `title`, `status`, `o:errorDetails`) from one exception filter
+- [x] Invoice money: `total`, `amountPaid`, `amountRemaining`, `status` (`open`/`paidInFull`); saving a `customerPayment` updates its invoice
+- [x] SuiteQL endpoint: tokenizer + parser for the grammar in SPEC §7.3, `limit`/`offset`, response with `items`, `count`, `offset`, `totalResults`, `hasMore`
+- [x] Chaos: `CHAOS_ERROR_RATE` (random 503s), `CHAOS_LATENCY_MS`, a rate limit returning 429 + `Retry-After`
+- [x] Tests: parser (valid and rejected queries), upsert twice = one record, payment updates invoice balance
 
 ### Done when
 
@@ -194,13 +194,20 @@ You can get a token, upsert a customer by external ID twice and see one record, 
 
 ### How to check
 
-```bash
-npm run start:dev -w mock-erp
-# then, with curl or a .http file:
-# 1. POST /services/rest/auth/oauth2/v1/token  -> access_token
-# 2. PUT  /services/rest/record/v1/customer/eid:CUS-77  (twice, with the token)
-# 3. POST /services/rest/query/v1/suiteql  {"q":"SELECT * FROM customer"}  -> 1 item
-```
+Automated: `npm run test:e2e -w mock-erp` runs exactly these steps over HTTP (see `apps/mock-erp/test/mock-erp.e2e-spec.ts`).
+
+By hand: start it with `npm run start:dev -w mock-erp`, then follow the curl walkthrough in [apps/mock-erp/README.md](../apps/mock-erp/README.md).
+
+### Decisions made while building it
+
+- **Field names** follow NetSuite (`entity`, `tranId`, `tranDate`, `item.items[]`, `expense.items[]`). A payment is `{ customer, payment, currency, apply: { items: [{ doc, amount }] } }`, like NetSuite's `apply` sublist.
+- **Item, account and currency** are references (`{ "id": "501" }`) the mock accepts without checking. It doesn't store those lists. Unknown SKUs or categories are caught earlier, by the integration's lookup tables (Phase 2).
+- **The mock enforces payment rules too** (overpayment, currency, customer), like NetSuite would. The integration still checks first, so the error is clear and classified as permanent.
+- **Unknown fields are rejected** (400), so a typo in a mapper fails loudly instead of being silently ignored.
+- **SuiteQL column names come back lowercase** (`tranid`, `amountremaining`), and a reference column returns the referenced record's internal ID, as in real SuiteQL.
+- **Rate limit defaults to 25 requests/second** (`RATE_LIMIT_PER_SECOND`, 0 = off). The token endpoint counts toward it.
+- **Chaos can also be changed at runtime** with `PUT /mock/chaos` (mock-only, needs a token, never subject to chaos itself).
+- **Writes are serialised in-process** so concurrent upserts of the same external ID can't create duplicates. In Phase 3, DynamoDB needs conditional writes and transactions to give the same guarantee across Lambda containers.
 
 ---
 
