@@ -2,6 +2,9 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "outDir": "./dist",
+    // The e2e test starts the real mock ERP from ../mock-erp/src (typecheck only;
+    // the build uses tsconfig.build.json with rootDir ./src).
+    "rootDir": "../..",
     "incremental": true,
     "emitDecoratorMetadata": true,
     "experimentalDecorators": true,

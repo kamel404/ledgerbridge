@@ -17,6 +17,7 @@
     "lint": "npm run lint --workspaces --if-present",
     "test": "npm run build:shared && npm run test --workspaces --if-present",
     "test:e2e": "npm run build:shared && npm run test:e2e --workspaces --if-present",
-    "invoke:lambda": "node --no-deprecation scripts/invoke-lambda.mjs"
+    "invoke:lambda": "node --no-deprecation scripts/invoke-lambda.mjs",
+    "simulate": "node --no-warnings scripts/simulate.ts"
   }
 }

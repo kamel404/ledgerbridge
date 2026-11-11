@@ -231,18 +231,18 @@ By hand: start it with `npm run start:dev -w mock-erp`, then follow the curl wal
 
 ### Tasks
 
-- [ ] `lookups/`: typed tables for sku → item ID, expenseCategory → account ID, currency → currency ID
-- [ ] `errors/`: `RetryableError` and `PermanentError`, each with a `code` and message
-- [ ] `erp-client/`: get + cache a token until shortly before expiry, refresh once on 401; 10 s timeout; `upsert`, `getByExternalId`, `suiteql`; turn ERP responses into the right error class (5xx/429/timeout/network → retryable, 400 → permanent)
-- [ ] Credentials via a `SecretsProvider` interface (local: env vars; Phase 4: Secrets Manager)
-- [ ] `flows/o2c/`: invoice mapper + handler (upsert customer, then invoice)
-- [ ] `flows/o2c/`: payment handler (invoice missing → retryable; amount > remaining or currency mismatch → permanent; else upsert `customerPayment`)
-- [ ] `flows/p2p/`: bill mapper + handler (upsert vendor, then vendor bill; unknown category → permanent)
-- [ ] Flow registry + a `processEvent(event)` function (this becomes the worker's core later)
-- [ ] `ingest/`: `POST /webhooks/billing` and `/webhooks/procurement`, app created with `rawBody: true`, signature guard, timestamp check, zod validation → 400 on bad payload
-- [ ] `sync-log/`: repository interface + in-memory version; record `RECEIVED`, `SUCCEEDED`, `FAILED`, `REJECTED`
-- [ ] `scripts/simulate.ts`: a signing helper + the `happy` command (10 invoices, their payments, 5 bills)
-- [ ] Unit tests: each mapper (including zero-line invoice, missing optional fields, unknown mapping), signature verification (good, bad, expired), error classification
+- [x] `lookups/`: typed tables for sku → item ID, expenseCategory → account ID, currency → currency ID
+- [x] `errors/`: `RetryableError` and `PermanentError`, each with a `code` and message
+- [x] `erp-client/`: get + cache a token until shortly before expiry, refresh once on 401; 10 s timeout; `upsert`, `getByExternalId`, `suiteql`; turn ERP responses into the right error class (5xx/429/timeout/network → retryable, 400 → permanent)
+- [x] Credentials via a `SecretsProvider` interface (local: env vars; Phase 4: Secrets Manager)
+- [x] `flows/o2c/`: invoice mapper + handler (upsert customer, then invoice)
+- [x] `flows/o2c/`: payment handler (invoice missing → retryable; amount > remaining or currency mismatch → permanent; else upsert `customerPayment`)
+- [x] `flows/p2p/`: bill mapper + handler (upsert vendor, then vendor bill; unknown category → permanent)
+- [x] Flow registry + a `processEvent(event)` function (this becomes the worker's core later)
+- [x] `ingest/`: `POST /webhooks/billing` and `/webhooks/procurement`, app created with `rawBody: true`, signature guard, timestamp check, zod validation → 400 on bad payload
+- [x] `sync-log/`: repository interface + in-memory version; record `RECEIVED`, `SUCCEEDED`, `FAILED`, `REJECTED`
+- [x] `scripts/simulate.ts`: a signing helper + the `happy` command (10 invoices, their payments, 5 bills)
+- [x] Unit tests: each mapper (including zero-line invoice, missing optional fields, unknown mapping), signature verification (good, bad, expired), error classification
 
 ### Done when
 
@@ -250,7 +250,29 @@ By hand: start it with `npm run start:dev -w mock-erp`, then follow the curl wal
 
 ### How to check
 
-Run both services, run `simulate happy`, then SuiteQL-query the mock: 10 customers/invoices/payments, 5 vendors/bills, every invoice `paidInFull`.
+Automated: `npm test -w integration-service` (mappers, signatures, error classes, ERP client, worker) and `npm run test:e2e -w integration-service`, which starts the real mock ERP in-process and sends signed webhooks over HTTP, including every rejection path.
+
+By hand (needs a `.env`, copied from `.env.example`):
+
+1. `npm run build`, then in two terminals `npm run start:dev -w mock-erp` and `npm run start:dev -w integration-service`.
+2. `npm run simulate -- happy`. It sends the events, then reads the mock ERP and checks: 10 customers/invoices/payments, 5 vendors/bills, every invoice `paidInFull`. Exit code 0 = pass.
+3. Optional: SuiteQL-query the mock yourself (curl walkthrough in [apps/mock-erp/README.md](../apps/mock-erp/README.md)), e.g. `SELECT tranId, status FROM invoice WHERE status = 'paidInFull'`.
+
+### Decisions made while building it
+
+- **The webhook runs the worker inline** through an `EventDispatcher` interface (`InlineDispatcher` now). Phase 3 swaps in an SQS dispatcher; ingest and worker code stay the same. Because it's inline, the `202` response also carries the final `status`. That field goes away once the queue is in.
+- **The worker core is already here** (`worker/sync-worker.ts`): skip if `SUCCEEDED`, `PROCESSING` with `attempts + 1`, then `SUCCEEDED` / `RETRYING` / `FAILED`. Phase 4 only wraps it in the SQS handler.
+- **No retries in Phase 2.** A retryable failure (rate limit, invoice not there yet) ends as `RETRYING` and stays there until the queue arrives. That's why the simulator waits 200 ms between webhooks (`--delay`): each event costs 2–3 ERP requests and the mock allows 25 per second.
+- **Webhook bodies are read as raw bytes** (`express.raw` on `/webhooks`, registered before Nest's JSON parser). The HMAC covers the exact bytes, and malformed JSON reaches our code, so it's logged as `REJECTED` (flow taken from the route, gap 3) instead of being answered by the parser.
+- **`X-Timestamp` is unix seconds.** Timestamps more than 5 minutes off in *either* direction are refused, so a forged future timestamp can't stay valid. The signature must be 64 hex characters; anything else is refused without reaching `timingSafeEqual`.
+- **A `401` writes nothing to the sync log**, so an unauthenticated caller can't fill our storage. Unknown source → `404`.
+- **Event type must match the route**: `bill.approved` on `/webhooks/billing` → `400 WRONG_SOURCE` (REJECTED).
+- **A REJECTED payload never overwrites a real record.** If its `id` already exists, the rejection is stored as `<id>:rejected:<uuid>`.
+- **Payment idempotency at the business-rule level:** before checking "amount ≤ remaining", the handler looks up the payment by external ID. If the ERP already has it, its earlier amount is added back. Otherwise re-processing an already-applied payment would look like an overpayment and fail permanently.
+- **ERP `401` after the one refresh → retryable** (`ERP_AUTH_FAILED`): usually rotated credentials, which a later retry picks up. Other non-429 `4xx` → permanent. Unexpected exceptions (bugs) → retryable, so they end in the DLQ and can be replayed instead of disappearing.
+- **Error codes:** our own (`UNKNOWN_SKU`, `UNKNOWN_EXPENSE_CATEGORY`, `UNKNOWN_CURRENCY`, `INVOICE_NOT_FOUND`, `PAYMENT_EXCEEDS_BALANCE`, `PAYMENT_CURRENCY_MISMATCH`, `PAYMENT_CUSTOMER_MISMATCH`, `INVALID_JSON`, `INVALID_PAYLOAD`, `WRONG_SOURCE`), and ERP ones prefixed `ERP_` (`ERP_INVALID_REFERENCE`, `ERP_RATE_LIMITED`, `ERP_TIMEOUT`, `ERP_UNREACHABLE`, …).
+- **Sync records already have `history[]`** (gap 4) and a 90-day `ttl`, so the DynamoDB version in Phase 3 is a storage swap.
+- **The e2e test imports the mock ERP's `AppModule`** directly. That makes it the contract test from SPEC §12: if the client's URLs or bodies drift from the mock's routes, it fails.
 
 ---
 
