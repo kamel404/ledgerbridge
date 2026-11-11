@@ -1,0 +1,8 @@
+{
+  "name": "ledgerbridge",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ]
+}
