@@ -11,7 +11,7 @@ A *stack* is a group of resources deployed and deleted together.
 | Stack | What's in it |
 |---|---|
 | `MockErpStack` | The fake NetSuite: a DynamoDB table, one Lambda running the Nest app, a public HTTPS URL (API Gateway) |
-| `LedgerBridgeStack` | The product: webhook URL (API Gateway) → ingest Lambda → `SyncLog` table + `SyncQueue` (SQS) with a dead-letter queue |
+| `LedgerBridgeStack` | The product: webhook URL (API Gateway) → ingest Lambda → `SyncLog` table + `SyncQueue` (SQS) with a dead-letter queue → worker Lambda → ERP |
 
 Both are in Region **eu-north-1**, the only Region our AWS project allows.
 
@@ -19,22 +19,23 @@ Both are in Region **eu-north-1**, the only Region our AWS project allows.
                         LedgerBridgeStack
  source app ──HTTPS──▶ API Gateway ──▶ Ingest Lambda ──▶ SyncLog (DynamoDB)   RECEIVED / REJECTED, dedup
   (signed webhook)     20 req/s max          │
-                                             └──────────▶ SyncQueue (SQS) ──▶ worker (Phase 4)
-                                                               └─ after 4 failures ─▶ SyncDLQ
-
-                        MockErpStack
-                       API Gateway ──▶ Mock ERP Lambda ──▶ Records (DynamoDB)
+                                             └──────────▶ SyncQueue (SQS) ──▶ Worker Lambda ──▶ SyncLog
+                                                               │          batches of 5,     SUCCEEDED / RETRYING / FAILED
+                                                               │          max 5 at once          │
+                                                               └─ after 4 failures ─▶ SyncDLQ    │ HTTPS + OAuth
+                        MockErpStack                                                             ▼
+                       API Gateway ──▶ Mock ERP Lambda ──▶ Records (DynamoDB)  ◀──────────────────┘
 ```
 
 ## Commands (from the repo root)
 
 | Command | What it does |
 |---|---|
-| `npm run aws:secrets` | Once, before the first deploy: makes `.env.aws` (gitignored) and stores the webhook secret in Secrets Manager |
+| `npm run aws:secrets` | Once, before the first deploy: makes `.env.aws` (gitignored) and stores the two secrets (`ledgerbridge/webhooks`, `ledgerbridge/erp`) in Secrets Manager. Safe to re-run |
 | `npm run synth` | Builds the Lambda bundles and prints the CloudFormation templates, without touching AWS |
 | `npm run cdk -- diff --profile ledgerbridge` | Shows what a deploy would change |
 | `npm run deploy` | Builds the bundles and deploys both stacks. Writes the URLs to `infra/cdk-outputs.json` |
-| `npm run destroy` | Deletes both stacks (tables and their data included). Then `npm run aws:secrets -- --delete` removes the secret |
+| `npm run destroy` | Deletes both stacks (tables and their data included). Then `npm run aws:secrets -- --delete` removes the secrets |
 | `npm test -w infra` | Checks the templates (DLQ after 4 tries, 7-day logs, permissions, ...) without deploying |
 
 The first deploy in an account needs `npm run cdk -- bootstrap --profile ledgerbridge` once. It creates a small S3 bucket and IAM roles that CDK uses to upload the Lambda code.
@@ -44,9 +45,13 @@ If AWS says your credentials expired: `aws login --profile ledgerbridge` (they l
 ## Design notes
 
 - **Lambda code**: `lambda.Function` + `Code.fromAsset(apps/<app>/dist-lambda)`, the rspack bundle, not `NodejsFunction` (its esbuild step would drop the decorator metadata Nest needs). Node 24, arm64 (cheaper), 512 MB.
-- **Permissions**: every Lambda has its own IAM role, and only `grant*()` calls add permissions. Ingest can write the SyncLog table, *send* to the queue (not receive or delete), and read the one webhook secret. Anything else fails with `AccessDenied`.
-- **Secrets**: LedgerBridge's webhook secret lives in Secrets Manager (`ledgerbridge/webhooks`). The Lambda gets only the secret's name. The mock ERP's client secret is a Lambda environment variable, acceptable only because it's the fake ERP.
-- **Secret lifecycle**: `npm run aws:secrets` creates the secret outside CDK, so its value never appears in a CloudFormation template; the stack only references it by name.
-- **Costs**: DynamoDB on demand, SQS and API Gateway per request, logs kept 7 days, API throttled at 20 requests/s. Idle cost is about $0.40/month (the secret).
+- **Permissions**: every Lambda has its own IAM role, and only `grant*()` calls add permissions. Anything else fails with `AccessDenied`.
+  - Ingest: write the SyncLog table, *send* to the queue (not receive or delete), read `ledgerbridge/webhooks`.
+  - Worker: receive/delete/change visibility on the queue (added by the event source), read and write the SyncLog table, read `ledgerbridge/erp`. It can't send to the queue or read the webhook secrets.
+- **Worker trigger**: an SQS event source with batch size 5, `ReportBatchItemFailures` (only failed messages return to the queue) and `maxConcurrency: 5` (at most 5 worker copies at once, so a burst can't flood the ERP). Worker timeout 30 s; the queue's visibility timeout is 6× that (180 s).
+- **ERP URL**: the worker gets the mock ERP's URL from `MockErpStack` (a cross-stack reference). Pointing at a real NetSuite later means passing its URL instead.
+- **Secrets**: LedgerBridge's secrets live in Secrets Manager (`ledgerbridge/webhooks` for ingest, `ledgerbridge/erp` for the worker). Each Lambda gets only the secret's name. The mock ERP's own client secret is a Lambda environment variable, acceptable only because it's the fake ERP.
+- **Secret lifecycle**: `npm run aws:secrets` creates the secrets outside CDK, so their values never appear in a CloudFormation template; the stack only references them by name.
+- **Costs**: DynamoDB on demand, SQS and API Gateway per request, logs kept 7 days, API throttled at 20 requests/s. Idle cost is about $0.80/month (two secrets at $0.40 each).
 - **Delete everything**: tables and log groups use `RemovalPolicy.DESTROY`, so `cdk destroy` leaves nothing behind. Fine for a learning project; a real system would keep (`RETAIN`) its data tables.
-- **No ERP calls in ingest**: on AWS, ingest only writes the sync record and sends to SQS (SPEC §8.1). Locally the same code processes events inline because no queue is configured.
+- **No ERP calls in ingest**: on AWS, ingest only writes the sync record and sends to SQS (SPEC §8.1); the worker does the ERP calls. Locally the same code processes events inline because no queue is configured.

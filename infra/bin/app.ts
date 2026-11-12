@@ -24,7 +24,7 @@ function required(name: string): string {
 const app = new cdk.App();
 const env = { account: process.env.CDK_DEFAULT_ACCOUNT, region: REGION };
 
-new MockErpStack(app, 'MockErpStack', {
+const mockErp = new MockErpStack(app, 'MockErpStack', {
   env,
   description: 'LedgerBridge: mock ERP (fake NetSuite)',
   clientId: required('MOCK_ERP_CLIENT_ID'),
@@ -34,8 +34,11 @@ new MockErpStack(app, 'MockErpStack', {
 
 new LedgerBridgeStack(app, 'LedgerBridgeStack', {
   env,
-  description: 'LedgerBridge: webhook ingest, sync log, queue',
+  description: 'LedgerBridge: webhook ingest, sync log, queue, worker',
   webhookSecretName: required('WEBHOOK_SECRET_NAME'),
+  erpSecretName: required('ERP_SECRET_NAME'),
+  // The worker talks to the mock ERP. Pointing at a real NetSuite = pass its URL instead.
+  erpBaseUrl: mockErp.url,
 });
 
 // Tags show up in the Billing console, so you can see what this project costs.

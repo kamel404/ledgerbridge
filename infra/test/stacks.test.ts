@@ -18,7 +18,12 @@ const env = { account: '123456789012', region: 'eu-north-1' };
 
 describe('LedgerBridgeStack', () => {
   const template = Template.fromStack(
-    new LedgerBridgeStack(new cdk.App(), 'LB', { env, webhookSecretName: 'ledgerbridge/webhooks' }),
+    new LedgerBridgeStack(new cdk.App(), 'LB', {
+      env,
+      webhookSecretName: 'ledgerbridge/webhooks',
+      erpSecretName: 'ledgerbridge/erp',
+      erpBaseUrl: 'https://erp.example',
+    }),
   );
 
   it('moves a message to the DLQ after 4 failed receives', () => {
@@ -60,11 +65,47 @@ describe('LedgerBridgeStack', () => {
     }
   });
 
+  /** The IAM policy statements attached to one Lambda's role, as JSON text. */
+  function policyOf(fnLogicalIdPrefix: string): string {
+    const fns = template.findResources('AWS::Lambda::Function');
+    const fnId = Object.keys(fns).find((id) => id.startsWith(fnLogicalIdPrefix))!;
+    const roleId = fns[fnId]!.Properties.Role['Fn::GetAtt'][0] as string;
+    const policies = Object.values(template.findResources('AWS::IAM::Policy')).filter((p) =>
+      JSON.stringify(p.Properties.Roles).includes(roleId),
+    );
+    return JSON.stringify(policies.map((p) => p.Properties.PolicyDocument));
+  }
+
   it('lets ingest send to the queue but not receive or delete', () => {
-    const policies = JSON.stringify(template.findResources('AWS::IAM::Policy'));
-    expect(policies).toContain('sqs:SendMessage');
-    expect(policies).not.toContain('sqs:ReceiveMessage');
-    expect(policies).not.toContain('sqs:DeleteMessage');
+    const policy = policyOf('Ingest');
+    expect(policy).toContain('sqs:SendMessage');
+    expect(policy).not.toContain('sqs:ReceiveMessage');
+    expect(policy).not.toContain('sqs:DeleteMessage');
+    expect(policy).not.toContain('ErpSecret'); // ingest never talks to the ERP
+  });
+
+  it('lets the worker consume the queue and read the ERP secret, but not send or read webhook secrets', () => {
+    const policy = policyOf('Worker');
+    expect(policy).toContain('sqs:ReceiveMessage');
+    expect(policy).toContain('sqs:ChangeMessageVisibility');
+    expect(policy).not.toContain('sqs:SendMessage');
+    expect(policy).toContain('secret:ledgerbridge/erp');
+    expect(policy).not.toContain('secret:ledgerbridge/webhooks');
+  });
+
+  it('triggers the worker from the queue: batches of 5, partial failures, at most 5 at once', () => {
+    template.hasResourceProperties('AWS::Lambda::EventSourceMapping', {
+      BatchSize: 5,
+      FunctionResponseTypes: ['ReportBatchItemFailures'],
+      ScalingConfig: { MaximumConcurrency: 5 },
+    });
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Handler: 'worker.handler',
+      Timeout: 30,
+      Environment: {
+        Variables: Match.objectLike({ ERP_BASE_URL: 'https://erp.example', ERP_SECRET_NAME: 'ledgerbridge/erp' }),
+      },
+    });
   });
 
   it('keeps logs for 7 days', () => {

@@ -368,16 +368,16 @@ Automated, no AWS needed: `npm test -w infra` checks the templates (redrive afte
 
 ### Tasks
 
-- [ ] `lambda/worker.ts`: `NestFactory.createApplicationContext()` (no HTTP server), cached between invocations
-- [ ] SQS event source: batch size 5, `reportBatchItemFailures: true`; set the queue visibility timeout from the worker timeout
-- [ ] Per message: mark `PROCESSING`, increment `attempts`, call `processEvent`, then `SUCCEEDED` (+ `erpRecordType`, `erpRecordId`, `completedAt`) / `RETRYING` / `FAILED` with `lastError`
-- [ ] Skip events already `SUCCEEDED`
-- [ ] On 429: `ChangeMessageVisibility` using `Retry-After`
-- [ ] `DynamoSyncLogRepository` (replacing the in-memory one in AWS)
-- [ ] Secrets Manager: create the 3 secrets (via CDK, with generated or manually set values), `SecretsManagerProvider` with in-memory cache, wire into ingest + worker
-- [ ] Worker gets the mock ERP URL from config (stack output passed as env var; a URL isn't a secret)
-- [ ] Simulator: `duplicates`, `out-of-order`, `bad-signature`, `bad-payload`, `unknown-category`
-- [ ] Local integration tests: same event twice → one ERP record; payment before invoice → eventually `SUCCEEDED`
+- [x] `lambda/worker.ts`: `NestFactory.createApplicationContext()` (no HTTP server), cached between invocations
+- [x] SQS event source: batch size 5, `reportBatchItemFailures: true`; set the queue visibility timeout from the worker timeout
+- [x] Per message: mark `PROCESSING`, increment `attempts`, call `processEvent`, then `SUCCEEDED` (+ `erpRecordType`, `erpRecordId`, `completedAt`) / `RETRYING` / `FAILED` with `lastError` *(already in `SyncWorker` since Phase 2)*
+- [x] Skip events already `SUCCEEDED`
+- [x] On 429: `ChangeMessageVisibility` using `Retry-After`
+- [x] `DynamoSyncLogRepository` (replacing the in-memory one in AWS) *(done in Phase 3)*
+- [x] Secrets Manager: `ledgerbridge/webhooks` (Phase 3) and `ledgerbridge/erp` via `npm run aws:secrets`, not CDK; `SecretsManagerProvider` with in-memory cache, wired into ingest + worker. *`ledgerbridge/admin` waits for Phase 7, where the admin API uses it.*
+- [x] Worker gets the mock ERP URL from config (stack output passed as env var; a URL isn't a secret)
+- [x] Simulator: `duplicates`, `out-of-order`, `bad-signature`, `bad-payload`, `unknown-category`
+- [x] Local integration tests: same event twice → one ERP record; payment before invoice → eventually `SUCCEEDED` (`apps/integration-service/test/worker.e2e-spec.ts`)
 
 ### Done when
 
@@ -386,6 +386,26 @@ Automated, no AWS needed: `npm test -w infra` checks the templates (redrive afte
 ### How to check
 
 Run each command, then: DynamoDB `SyncLog` shows `SUCCEEDED` (the out-of-order payment with `attempts` > 1); a SuiteQL query on the deployed mock shows exactly one record per external ID.
+
+1. Once: `npm run aws:secrets` (adds `ledgerbridge/erp`; the existing values are kept), then `npm run deploy`.
+2. `npm run simulate -- duplicates --aws` and `npm run simulate -- out-of-order --aws`. Both read the SyncLog and the ERP themselves and print `ok`/`FAIL` per check; exit code 0 = pass.
+3. Also: `bad-signature`, `bad-payload`, `unknown-category` and `happy`, all with `--aws`.
+4. Console (Region **eu-north-1**) → Lambda → the `Worker` function → **Monitor** → **View CloudWatch logs**: one line per message, e.g. `evt_… payment.received: RETRYING INVOICE_NOT_FOUND (receive 1)`, then `SUCCEEDED (receive 2)`.
+5. Console → DynamoDB → the `SyncLog` table → **Explore table items**: the out-of-order payment has `attempts` 2 and a `history` of RECEIVED → PROCESSING → RETRYING → PROCESSING → SUCCEEDED.
+
+Automated, no AWS needed: `npm run test:e2e -w integration-service` runs the same scenarios through the real worker code with an in-memory queue (duplicates, SQS delivering twice, out-of-order, ERP down until the DLQ, permanent failure).
+
+### Decisions made while building it
+
+- **Shorter retry delays than the visibility timeout.** A message the worker reports as failed would normally come back after the queue's visibility timeout (180 s). The worker sets it with `ChangeMessageVisibility` instead: the ERP's `Retry-After` if there was one (capped at 15 min), else 10 s, 30 s, 90 s for receives 1, 2, 3. The 4th failed receive goes to the DLQ (redrive policy). An out-of-order payment now syncs about 10 s after its invoice, not 3 minutes.
+- **`maxConcurrency: 5` on the queue trigger**: at most 5 worker copies run at once, so a burst of events can't flood the ERP. It's set on the event source, not as *reserved concurrency* (which new AWS accounts often can't use because their total concurrency limit is low).
+- **Messages in a batch are processed one after the other.** It keeps the ERP request rate low, and two copies of one event in the same batch can't race. A batch of 5 takes a few seconds, far below the 30 s timeout.
+- **Unreadable messages** (not JSON, no `eventId`, invalid event) and worker crashes (e.g. DynamoDB unavailable) are reported as failed, so they end in the DLQ for a human instead of disappearing.
+- **The ERP secret is created by `npm run aws:secrets`, not CDK**, for the same reason as the webhook secret in Phase 3: a CDK-generated value would be fine, but a value we *set* would sit in the CloudFormation template. Its values are the same client ID/secret the mock ERP is deployed with.
+- **The worker gets the ERP URL as a cross-stack reference** (`mockErp.url` → `ERP_BASE_URL`). CDK deploys `MockErpStack` first. For a real NetSuite you'd pass its URL string instead.
+- **Two bundles, one file each.** With two entries rspack split shared code into `0.js`/`1.js`. `dynamicImportMode: 'eager'` keeps dynamic imports inside each entry file. Both files sit in one `dist-lambda/` asset; each Lambda just uses a different handler (`http.handler`, `worker.handler`).
+- **The simulator reads the SyncLog with the AWS CLI** on `--aws`, because the 202 only means "queued" and there's no admin API until Phase 7. Locally the 202 still carries the final status (inline worker), so `out-of-order` can't retry locally and says so.
+- **A message that exhausts its retries stays `RETRYING`** in the sync log, with `attempts: 4`. Phase 5's DLQ handler turns it into `DEAD`.
 
 > **Minimum strong demo:** Phases 0–4 plus the DLQ alarm from Phase 6.
 

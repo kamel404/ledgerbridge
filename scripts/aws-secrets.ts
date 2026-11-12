@@ -1,57 +1,33 @@
 // Creates the cloud secrets LedgerBridge needs on AWS. Run once before the first deploy:
 //
-//   npm run aws:secrets             create missing values, store the webhook secret in Secrets Manager
-//   npm run aws:secrets -- --delete delete the Secrets Manager secret (cleanup after `cdk destroy`)
+//   npm run aws:secrets             create missing values, store both secrets in Secrets Manager
+//   npm run aws:secrets -- --delete delete both Secrets Manager secrets (cleanup after `cdk destroy`)
 //
 // What it does:
 // 1. Creates `.env.aws` in the repo root (gitignored) with strong random values,
 //    keeping any values already there. The simulator signs webhooks with these,
 //    and CDK reads the mock ERP's values from it.
-// 2. Stores {"billing": ..., "procurement": ...} in Secrets Manager as
-//    `ledgerbridge/webhooks` (creates it, or updates it if it exists).
-//    The ingest Lambda reads it from there at runtime.
+// 2. Stores two JSON secrets in Secrets Manager (creates them, or updates
+//    them if they exist):
+//    - `ledgerbridge/webhooks` {"billing", "procurement"}: read by the ingest Lambda
+//    - `ledgerbridge/erp` {"clientId", "clientSecret"}: read by the worker Lambda
+//      to log in to the ERP. Same values the mock ERP is deployed with.
 //
 // Secret values are never printed. They go to the AWS CLI through a temporary
 // file (not the command line) that is deleted right after.
 //
-// Uses the AWS CLI with profile `ledgerbridge` (override: AWS_PROFILE=...).
+// Uses the AWS CLI with profile `ledgerbridge` (override: AWS_PROFILE=...), see aws-cli.ts.
 
-import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { aws, loginHint } from './aws-cli.ts';
 
-const REGION = 'eu-north-1';
-const PROFILE = process.env.AWS_PROFILE ?? 'ledgerbridge';
 const ENV_FILE = fileURLToPath(new URL('../.env.aws', import.meta.url));
 const WEBHOOK_SECRET_NAME = 'ledgerbridge/webhooks';
-
-/** The AWS CLI: on PATH, or where its Windows installer puts it. */
-function awsCli(): string {
-  const candidates = ['aws'];
-  if (process.env.LOCALAPPDATA) {
-    candidates.push(path.join(process.env.LOCALAPPDATA, 'Programs', 'Amazon', 'AWSCLIV2', 'aws.exe'));
-  }
-  for (const c of candidates) {
-    try {
-      execFileSync(c, ['--version'], { stdio: 'ignore' });
-      return c;
-    } catch {
-      // try the next one
-    }
-  }
-  throw new Error('AWS CLI not found. Install it (see docs/PLAN.md Part A.5).');
-}
-
-function aws(args: string[]): string {
-  return execFileSync(awsCli(), [...args, '--region', REGION, '--profile', PROFILE], {
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, PYTHONUTF8: '1' },
-  });
-}
+const ERP_SECRET_NAME = 'ledgerbridge/erp';
 
 const random = () => randomBytes(32).toString('base64url');
 
@@ -75,6 +51,7 @@ function ensureEnvFile(): Map<string, string> {
     WEBHOOK_SECRET_NAME: () => WEBHOOK_SECRET_NAME,
     WEBHOOK_SECRET_BILLING: random,
     WEBHOOK_SECRET_PROCUREMENT: random,
+    ERP_SECRET_NAME: () => ERP_SECRET_NAME,
   };
   const added: string[] = [];
   for (const [key, make] of Object.entries(defaults)) {
@@ -116,21 +93,18 @@ function withSecretFile<T>(value: string, fn: (fileArg: string) => T): T {
   }
 }
 
-function storeWebhookSecret(values: Map<string, string>): void {
-  const name = values.get('WEBHOOK_SECRET_NAME')!;
-  const value = JSON.stringify({
-    billing: values.get('WEBHOOK_SECRET_BILLING'),
-    procurement: values.get('WEBHOOK_SECRET_PROCUREMENT'),
-  });
+/** Creates the secret, or stores a new value if it already exists. */
+function storeSecret(name: string, description: string, value: Record<string, string | undefined>): void {
+  const json = JSON.stringify(value);
   if (secretExists(name)) {
-    withSecretFile(value, (f) => aws(['secretsmanager', 'put-secret-value', '--secret-id', name, '--secret-string', f]));
+    withSecretFile(json, (f) => aws(['secretsmanager', 'put-secret-value', '--secret-id', name, '--secret-string', f]));
     console.log(`Secrets Manager: updated ${name}`);
   } else {
-    withSecretFile(value, (f) =>
+    withSecretFile(json, (f) =>
       aws([
         'secretsmanager', 'create-secret',
         '--name', name,
-        '--description', 'LedgerBridge webhook HMAC secrets, one per source app',
+        '--description', description,
         '--tags', 'Key=project,Value=ledgerbridge',
         '--secret-string', f,
       ]),
@@ -139,25 +113,37 @@ function storeWebhookSecret(values: Map<string, string>): void {
   }
 }
 
-function deleteWebhookSecret(): void {
-  const name = readEnvFile(ENV_FILE).get('WEBHOOK_SECRET_NAME') ?? WEBHOOK_SECRET_NAME;
-  if (!secretExists(name)) {
-    console.log(`Secrets Manager: ${name} does not exist`);
-    return;
+function storeAll(values: Map<string, string>): void {
+  storeSecret(values.get('WEBHOOK_SECRET_NAME')!, 'LedgerBridge webhook HMAC secrets, one per source app', {
+    billing: values.get('WEBHOOK_SECRET_BILLING'),
+    procurement: values.get('WEBHOOK_SECRET_PROCUREMENT'),
+  });
+  storeSecret(values.get('ERP_SECRET_NAME')!, 'LedgerBridge OAuth client credentials for the ERP', {
+    clientId: values.get('MOCK_ERP_CLIENT_ID'),
+    clientSecret: values.get('MOCK_ERP_CLIENT_SECRET'),
+  });
+}
+
+function deleteAll(): void {
+  const values = readEnvFile(ENV_FILE);
+  for (const name of [values.get('WEBHOOK_SECRET_NAME') ?? WEBHOOK_SECRET_NAME, values.get('ERP_SECRET_NAME') ?? ERP_SECRET_NAME]) {
+    if (!secretExists(name)) {
+      console.log(`Secrets Manager: ${name} does not exist`);
+      continue;
+    }
+    // No recovery window: deleted at once, so the name can be reused and billing stops.
+    aws(['secretsmanager', 'delete-secret', '--secret-id', name, '--force-delete-without-recovery']);
+    console.log(`Secrets Manager: deleted ${name}`);
   }
-  // No recovery window: deleted at once, so the name can be reused and billing stops.
-  aws(['secretsmanager', 'delete-secret', '--secret-id', name, '--force-delete-without-recovery']);
-  console.log(`Secrets Manager: deleted ${name}`);
 }
 
 try {
-  if (process.argv.includes('--delete')) deleteWebhookSecret();
-  else storeWebhookSecret(ensureEnvFile());
+  if (process.argv.includes('--delete')) deleteAll();
+  else storeAll(ensureEnvFile());
 } catch (err) {
   const e = err as { stderr?: string; message?: string };
   console.error(e.stderr?.trim() || e.message || String(err));
-  if (String(e.stderr).match(/ExpiredToken|Unable to locate credentials|login/i)) {
-    console.error(`Your AWS login may have expired. Run: aws login --profile ${PROFILE}`);
-  }
+  const hint = loginHint(err);
+  if (hint) console.error(hint);
   process.exit(1);
 }

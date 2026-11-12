@@ -2,6 +2,7 @@ import cdk from 'aws-cdk-lib';
 import apigw from 'aws-cdk-lib/aws-apigatewayv2';
 import integrations from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import dynamodb from 'aws-cdk-lib/aws-dynamodb';
+import { SqsEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
 import secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import sqs from 'aws-cdk-lib/aws-sqs';
 import type { Construct } from 'constructs';
@@ -10,16 +11,20 @@ import { NestFunction } from './shared.ts';
 export interface LedgerBridgeStackProps extends cdk.StackProps {
   /** Secrets Manager secret {"billing": "...", "procurement": "..."}, created by `npm run aws:secrets`. */
   readonly webhookSecretName: string;
+  /** Secrets Manager secret {"clientId": "...", "clientSecret": "..."} for the ERP, also from `npm run aws:secrets`. */
+  readonly erpSecretName: string;
+  /** Where the ERP lives: the mock ERP stack's URL, or a real NetSuite later. Not a secret. */
+  readonly erpBaseUrl: string;
 }
 
-/** Worker Lambda timeout (Phase 4). The queue's visibility timeout is derived from it. */
+/** Worker Lambda timeout. The queue's visibility timeout is derived from it. */
 export const WORKER_TIMEOUT = cdk.Duration.seconds(30);
 
 /**
- * The product (SPEC §4, §8): webhook in -> sync log -> queue.
+ * The product (SPEC §4, §8): webhook in -> sync log -> queue -> worker -> ERP.
  *
  *   API Gateway --> ingest Lambda --> SyncLog table (RECEIVED, dedup)
- *                                 \-> SQS SyncQueue --(Phase 4)--> worker
+ *                                 \-> SQS SyncQueue --> worker Lambda --> ERP
  *                                       \-> after 4 failed receives: SyncDLQ
  */
 export class LedgerBridgeStack extends cdk.Stack {
@@ -63,7 +68,10 @@ export class LedgerBridgeStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
+    // Both secrets are created outside CDK by `npm run aws:secrets`, so their
+    // values never appear in a CloudFormation template. CDK only knows the names.
     const webhookSecret = secretsmanager.Secret.fromSecretNameV2(this, 'WebhookSecret', props.webhookSecretName);
+    const erpSecret = secretsmanager.Secret.fromSecretNameV2(this, 'ErpSecret', props.erpSecretName);
 
     // ---- Ingest Lambda ---------------------------------------------------------
     const ingest = new NestFunction(this, 'Ingest', {
@@ -82,6 +90,31 @@ export class LedgerBridgeStack extends cdk.Stack {
     syncLog.grantReadWriteData(ingest);
     queue.grantSendMessages(ingest);
     webhookSecret.grantRead(ingest);
+
+    // ---- Worker Lambda (SPEC §8.2) ---------------------------------------------
+    const worker = new NestFunction(this, 'Worker', {
+      app: 'integration-service',
+      entry: 'worker',
+      description: 'LedgerBridge worker: queue -> flow handler -> ERP',
+      timeout: WORKER_TIMEOUT,
+      environment: {
+        SYNC_LOG_TABLE: syncLog.tableName,
+        ERP_BASE_URL: props.erpBaseUrl,
+        ERP_SECRET_NAME: props.erpSecretName,
+      },
+    });
+    // AWS polls the queue and calls the worker with up to 5 messages.
+    // reportBatchItemFailures: only the messages the worker lists as failed
+    // return to the queue, not the whole batch.
+    // maxConcurrency: at most 5 worker copies at once, so a burst of events
+    // can't flood the ERP (the mock allows 25 requests/s).
+    worker.addEventSource(
+      new SqsEventSource(queue, { batchSize: 5, reportBatchItemFailures: true, maxConcurrency: 5 }),
+    );
+    // The event source already lets the worker receive/delete/change visibility
+    // on this queue. Plus: read and update sync records, read the ERP secret.
+    syncLog.grantReadWriteData(worker);
+    erpSecret.grantRead(worker);
 
     // ---- Public HTTP API -------------------------------------------------------
     const api = new apigw.HttpApi(this, 'HttpApi', {
@@ -104,5 +137,6 @@ export class LedgerBridgeStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'SyncQueueUrl', { value: queue.queueUrl });
     new cdk.CfnOutput(this, 'SyncDlqUrl', { value: dlq.queueUrl });
     new cdk.CfnOutput(this, 'SyncLogTableName', { value: syncLog.tableName });
+    new cdk.CfnOutput(this, 'WorkerFunctionName', { value: worker.functionName });
   }
 }

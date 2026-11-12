@@ -47,17 +47,27 @@ function isMissingOptionalPackage(resource) {
  * @param {import('@rspack/core').Configuration} defaults Nest CLI defaults
  * @param {typeof import('@rspack/core')} rspack
  */
+const ENTRIES = {
+  // One entry per Lambda. Later phases add csv, reconcile, ...
+  http: './src/lambda/http.ts',
+  worker: './src/lambda/worker.ts',
+};
+
 module.exports = (defaults, rspack) => ({
   ...defaults,
-  entry: {
-    // One entry per Lambda. Later phases add worker, csv, reconcile, ...
-    http: './src/lambda/http.ts',
-  },
+  entry: ENTRIES,
   // Bundle every dependency: the Lambda zip has no node_modules folder.
   // Node built-ins (fs, crypto, ...) stay as require() via externalsPresets.
   externals: [],
   externalsPresets: { node: true },
   experiments: {},
+  // Dynamic import() stays inside the entry file instead of becoming a chunk.
+  // Needed once there are two entries: chunks they share (0.js, 1.js) can't be
+  // merged into both by LimitChunkCountPlugin.
+  module: {
+    ...defaults.module,
+    parser: { ...defaults.module?.parser, javascript: { ...defaults.module?.parser?.javascript, dynamicImportMode: 'eager' } },
+  },
   output: {
     path: path.resolve(__dirname, 'dist-lambda'),
     filename: '[name].js',
@@ -67,8 +77,9 @@ module.exports = (defaults, rspack) => ({
   plugins: [
     // Replaces Nest's default IgnorePlugin, which misses '.js'-suffixed paths.
     new rspack.IgnorePlugin({ checkResource: isMissingOptionalPackage }),
-    // Inline dynamic imports so each Lambda is exactly one file.
-    new rspack.optimize.LimitChunkCountPlugin({ maxChunks: 1 }),
+    // Inline dynamic imports so each Lambda is exactly one file: one chunk per
+    // entry (with maxChunks below the entry count, shared chunks like 0.js appear).
+    new rspack.optimize.LimitChunkCountPlugin({ maxChunks: Object.keys(ENTRIES).length }),
     new CommonJsMarkerPlugin(),
   ],
 });

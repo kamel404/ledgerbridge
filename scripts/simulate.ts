@@ -1,19 +1,26 @@
 // Fake source apps (SPEC §12): sends signed webhooks to the integration service.
 //
-//   npm run simulate -- happy        10 invoices, their payments, 5 vendor bills,
-//                                    then checks the results in the mock ERP
-//
-//   npm run simulate -- one          one invoice event; prints the response
-//
-// More commands (duplicates, out-of-order, bad-signature, ...) arrive in Phase 4.
+//   npm run simulate -- happy             10 invoices, their payments, 5 vendor bills,
+//                                         then checks the results in the mock ERP
+//   npm run simulate -- one               one invoice event; prints the response
+//   npm run simulate -- duplicates        the same event 3 times (+ once more with a new
+//                                         event ID): one sync record, one ERP record
+//   npm run simulate -- out-of-order      a payment before its invoice: retried until it
+//                                         succeeds (needs the queue, so use --aws)
+//   npm run simulate -- bad-signature     wrong secret, old timestamp -> 401, nothing logged
+//   npm run simulate -- bad-payload       schema failure, broken JSON, wrong route -> 400 REJECTED
+//   npm run simulate -- unknown-category  a bill with an unmapped category -> FAILED, not retried
 //
 // Options:
 //   --aws          send to the deployed AWS API instead of localhost. The URLs
 //                  come from infra/cdk-outputs.json (written by `npm run deploy`)
 //                  and the secrets from .env.aws (`npm run aws:secrets`).
-//   --delay <ms>   pause between webhooks (default 200). Each event costs the
-//                  ERP 2-3 requests and the mock allows 25/s; until the queue
-//                  retries 429s (Phase 4), a burst would leave events RETRYING.
+//                  The 202 reply only means "queued", so the simulator then
+//                  reads the SyncLog table (AWS CLI, profile ledgerbridge)
+//                  until each event reaches its final status.
+//   --delay <ms>   pause between webhooks (default 200). Locally there's no
+//                  queue, so a burst would hit the mock ERP's 25 requests/s
+//                  limit and leave events RETRYING.
 //
 // Local settings come from the repo-root .env (see .env.example):
 //   INTEGRATION_URL (default http://localhost:$INTEGRATION_SERVICE_PORT)
@@ -25,6 +32,7 @@
 import { createHmac } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { aws, loginHint } from './aws-cli.ts';
 
 const args = process.argv.slice(2);
 const ON_AWS = args.includes('--aws');
@@ -37,15 +45,16 @@ else if (ON_AWS) {
   process.exit(2);
 }
 
-/** URLs of the deployed stacks, from `cdk deploy --outputs-file`. */
-function awsOutputs(): { apiUrl: string; erpUrl: string } {
+/** URLs and names of the deployed stacks, from `cdk deploy --outputs-file`. */
+function awsOutputs(): { apiUrl: string; erpUrl: string; tableName: string } {
   const file = repoFile('infra/cdk-outputs.json');
   if (!existsSync(file)) {
     console.error('infra/cdk-outputs.json is missing. Run `npm run deploy` first.');
     process.exit(2);
   }
   const outputs = JSON.parse(readFileSync(file, 'utf8')) as Record<string, Record<string, string>>;
-  return { apiUrl: outputs.LedgerBridgeStack?.ApiUrl ?? '', erpUrl: outputs.MockErpStack?.MockErpUrl ?? '' };
+  const lb = outputs.LedgerBridgeStack ?? {};
+  return { apiUrl: lb.ApiUrl ?? '', erpUrl: outputs.MockErpStack?.MockErpUrl ?? '', tableName: lb.SyncLogTableName ?? '' };
 }
 
 const env = process.env;
@@ -87,14 +96,23 @@ interface SendResult {
   body: Json;
 }
 
-async function send(source: Source, event: Json): Promise<SendResult> {
-  const secret = SECRETS[source];
+interface SendOptions {
+  /** Sign with this secret instead of the source's real one. */
+  secret?: string;
+  /** X-Timestamp in unix seconds (default: now). */
+  timestamp?: number;
+  /** Send this exact text instead of JSON.stringify(event). */
+  raw?: string;
+}
+
+async function send(source: Source, event: Json, opts: SendOptions = {}): Promise<SendResult> {
+  const secret = opts.secret ?? SECRETS[source];
   if (!secret) throw new Error(`Set WEBHOOK_SECRET_${source.toUpperCase()} (see .env.example)`);
-  const body = JSON.stringify(event);
+  const body = opts.raw ?? JSON.stringify(event);
   if (DELAY_MS > 0) await sleep(DELAY_MS);
   const res = await fetch(`${INTEGRATION_URL}/webhooks/${source}`, {
     method: 'POST',
-    headers: signHeaders(secret, body),
+    headers: signHeaders(secret, body, opts.timestamp),
     body,
   });
   const text = await res.text();
@@ -269,21 +287,129 @@ async function erpGet(token: string, type: string, externalId: string): Promise<
   return (await res.json()) as Json;
 }
 
+/** How many ERP records of this type have this external ID (SuiteQL). Should never be more than 1. */
+async function erpCount(token: string, type: string, externalId: string): Promise<number> {
+  const res = await erpFetch(`${ERP_URL}/services/rest/query/v1/suiteql`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, Prefer: 'transient', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ q: `SELECT id FROM ${type} WHERE externalId = '${externalId}'` }),
+  });
+  if (!res.ok) throw new Error(`SuiteQL failed: ${res.status} ${await res.text()}`);
+  return ((await res.json()) as { totalResults: number }).totalResults;
+}
+
+// ---------------------------------------------------------------------------
+// Sync status
+// ---------------------------------------------------------------------------
+
+interface SyncState {
+  status: string;
+  attempts?: number;
+  error?: string;
+}
+
+const FINAL = new Set(['SUCCEEDED', 'FAILED', 'DEAD', 'REJECTED']);
+
+type DynamoValue = { S?: string; N?: string; M?: Record<string, { S?: string }> };
+
+/** Reads sync records straight from the SyncLog table (AWS only; there's no admin API until Phase 7). */
+function readSyncLog(eventIds: string[]): Map<string, SyncState> {
+  const found = new Map<string, SyncState>();
+  for (let i = 0; i < eventIds.length; i += 100) {
+    const request = {
+      [deployed!.tableName]: {
+        Keys: eventIds.slice(i, i + 100).map((id) => ({ eventId: { S: id } })),
+        ConsistentRead: true,
+        ProjectionExpression: 'eventId, #s, attempts, lastError',
+        ExpressionAttributeNames: { '#s': 'status' },
+      },
+    };
+    const out = JSON.parse(aws(['dynamodb', 'batch-get-item', '--request-items', JSON.stringify(request)])) as {
+      Responses: Record<string, Array<Record<string, DynamoValue>>>;
+    };
+    for (const item of Object.values(out.Responses).flat()) {
+      found.set(item.eventId!.S!, {
+        status: item.status?.S ?? '?',
+        attempts: Number(item.attempts?.N ?? 0),
+        ...(item.lastError?.M?.code?.S && { error: item.lastError.M.code.S }),
+      });
+    }
+  }
+  return found;
+}
+
+/**
+ * The final status of each event. Locally the worker runs inside the webhook
+ * request, so the 202 reply already has it. On AWS the worker runs later, so
+ * poll the SyncLog until every event is final (or the time runs out).
+ */
+async function settle(
+  eventIds: string[],
+  localReplies: Map<string, SendResult>,
+  timeoutMs = 150_000,
+): Promise<Map<string, SyncState>> {
+  if (!ON_AWS) {
+    return new Map(eventIds.map((id) => [id, { status: String(localReplies.get(id)?.body.status ?? '?') }]));
+  }
+  const deadline = Date.now() + timeoutMs;
+  let lastLine = '';
+  for (;;) {
+    const states = readSyncLog(eventIds);
+    const pending = eventIds.filter((id) => !FINAL.has(states.get(id)?.status ?? ''));
+    if (pending.length === 0 || Date.now() > deadline) return states;
+    const waitingOn = [...new Set(pending.map((id) => states.get(id)?.status ?? 'not found'))].join(', ');
+    const line = `  waiting for ${pending.length} of ${eventIds.length} events (${waitingOn})`;
+    if (line !== lastLine) console.log(line);
+    lastLine = line;
+    await sleep(3000);
+  }
+}
+
+/** Waits until one event has a given status (AWS), e.g. "the payment has failed once". */
+async function waitForStatus(eventId: string, wanted: string, timeoutMs = 60_000): Promise<SyncState | undefined> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const state = readSyncLog([eventId]).get(eventId);
+    if (state?.status === wanted) return state;
+    await sleep(1000);
+  }
+  return undefined;
+}
+
+const describeState = (s?: SyncState) =>
+  s ? [s.status, s.attempts ? `attempts ${s.attempts}` : '', s.error ?? ''].filter(Boolean).join(', ') : 'no sync record';
+
 // ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
 
-function report(label: string, results: SendResult[]): boolean {
-  const byOutcome = new Map<string, number>();
-  for (const r of results) {
-    const key = `${r.status} ${String(r.body.status ?? r.body.error ?? '')}`.trim();
-    byOutcome.set(key, (byOutcome.get(key) ?? 0) + 1);
+/** Prints one check line. */
+function check(ok: boolean, label: string, detail = ''): boolean {
+  console.log(`  ${ok ? 'ok  ' : 'FAIL'} ${label}${detail ? `: ${detail}` : ''}`);
+  return ok;
+}
+
+/** Sends the events in order, then waits for their final status. */
+async function sendAndSettle(items: Array<{ source: Source; event: Json }>): Promise<Map<string, SyncState>> {
+  const replies = new Map<string, SendResult>();
+  for (const { source, event } of items) {
+    const res = await send(source, event);
+    replies.set(String(event.id), res);
+    if (res.status !== 202) console.log(`  unexpected ${res.status} for ${String(event.id)}: ${JSON.stringify(res.body)}`);
   }
-  const summary = [...byOutcome].map(([k, n]) => `${n} x ${k}`).join(', ');
-  const ok = results.every((r) => r.status === 202 && r.body.status === 'SUCCEEDED');
-  console.log(`  ${ok ? 'ok  ' : 'FAIL'} ${label.padEnd(9)} ${summary}`);
-  for (const r of results.filter((x) => !(x.status === 202 && x.body.status === 'SUCCEEDED'))) {
-    console.log(`         ${JSON.stringify(r.body)}`);
+  return settle([...replies.keys()], replies);
+}
+
+function reportGroup(label: string, ids: string[], states: Map<string, SyncState>): boolean {
+  const counts = new Map<string, number>();
+  for (const id of ids) {
+    const st = states.get(id)?.status ?? 'missing';
+    counts.set(st, (counts.get(st) ?? 0) + 1);
+  }
+  const ok = ids.every((id) => states.get(id)?.status === 'SUCCEEDED');
+  check(ok, label.padEnd(9), [...counts].map(([k, n]) => `${n} x ${k}`).join(', '));
+  for (const id of ids.filter((x) => states.get(x)?.status !== 'SUCCEEDED')) {
+    console.log(`         ${id}: ${describeState(states.get(id))}`);
   }
   return ok;
 }
@@ -291,21 +417,17 @@ function report(label: string, results: SendResult[]): boolean {
 async function happy(): Promise<boolean> {
   console.log(`Run ${RUN}: sending to ${INTEGRATION_URL}`);
   const invoices = Array.from({ length: 10 }, (_, i) => makeInvoice(i));
+  const payments = invoices.map((inv, i) => makePayment(inv, i));
   const bills = Array.from({ length: 5 }, (_, i) => makeBill(i));
 
-  // In order: payments need their invoice to exist (out-of-order is Phase 4).
-  const sent = {
-    invoices: [] as SendResult[],
-    payments: [] as SendResult[],
-    bills: [] as SendResult[],
-  };
-  for (const inv of invoices) sent.invoices.push(await send('billing', inv.event));
-  for (const [i, inv] of invoices.entries()) sent.payments.push(await send('billing', makePayment(inv, i)));
-  for (const bill of bills) sent.bills.push(await send('procurement', bill.event));
-
-  let ok = report('invoices', sent.invoices);
-  ok = report('payments', sent.payments) && ok;
-  ok = report('bills', sent.bills) && ok;
+  const states = await sendAndSettle([
+    ...invoices.map((inv) => ({ source: 'billing' as const, event: inv.event })),
+    ...payments.map((event) => ({ source: 'billing' as const, event })),
+    ...bills.map((b) => ({ source: 'procurement' as const, event: b.event })),
+  ]);
+  let ok = reportGroup('invoices', invoices.map((i) => String(i.event.id)), states);
+  ok = reportGroup('payments', payments.map((p) => String(p.id)), states) && ok;
+  ok = reportGroup('bills', bills.map((b) => String(b.event.id)), states) && ok;
 
   console.log(`Checking the ERP at ${ERP_URL}`);
   const token = await erpToken();
@@ -325,15 +447,16 @@ async function happy(): Promise<boolean> {
     if (!(await erpGet(token, 'vendorBill', bill.billNumber))) problems.push(`vendor bill ${bill.billNumber} missing`);
   }
 
-  console.log(
-    `  ${problems.length ? 'FAIL' : 'ok  '} ${customerIds.size} customers, ${invoices.length} invoices (all paidInFull), ` +
+  check(
+    problems.length === 0,
+    `${customerIds.size} customers, ${invoices.length} invoices (all paidInFull), ` +
       `${invoices.length} payments, ${vendorIds.size} vendors, ${bills.length} vendor bills`,
   );
   for (const p of problems) console.log(`         ${p}`);
   return ok && problems.length === 0;
 }
 
-/** Sends one invoice event. On AWS (Phase 3) the expected answer is 202 { syncId }: queued. */
+/** Sends one invoice event. On AWS the expected answer is 202 { syncId }: queued. */
 async function one(): Promise<boolean> {
   const inv = makeInvoice(0);
   console.log(`Sending ${String(inv.event.type)} ${inv.invoiceId} (event ${String(inv.event.id)}) to ${INTEGRATION_URL}`);
@@ -342,12 +465,147 @@ async function one(): Promise<boolean> {
   return res.status === 202;
 }
 
-const COMMANDS: Record<string, () => Promise<boolean>> = { happy, one };
+/**
+ * Both idempotency layers (SPEC §8.3):
+ * - event level: the same event ID 3 times -> 202 once, then 200 duplicate
+ * - record level: the same invoice under a new event ID -> processed again,
+ *   but it's an upsert by external ID, so still one ERP record
+ */
+async function duplicates(): Promise<boolean> {
+  const inv = makeInvoice(0);
+  const id = String(inv.event.id);
+  console.log(`Sending invoice ${inv.invoiceId} (event ${id}) 3 times to ${INTEGRATION_URL}`);
+  const replies: SendResult[] = [];
+  for (let i = 0; i < 3; i++) replies.push(await send('billing', inv.event));
+  let ok = check(
+    replies[0]!.status === 202 && replies.slice(1).every((r) => r.status === 200 && r.body.duplicate === true),
+    'event level',
+    replies.map((r) => `${r.status}${r.body.duplicate ? ' duplicate' : ''}`).join(', '),
+  );
+
+  const again = { ...inv.event, id: eventId() };
+  const againId = String(again.id);
+  const againReply = await send('billing', again);
+  ok = check(againReply.status === 202, 'same invoice, new event ID', `${againReply.status} (accepted: it's a different event)`) && ok;
+
+  const states = await settle([id, againId], new Map([[id, replies[0]!], [againId, againReply]]));
+  ok = check(states.get(id)?.status === 'SUCCEEDED', `event ${id}`, describeState(states.get(id))) && ok;
+  ok = check(states.get(againId)?.status === 'SUCCEEDED', `event ${againId}`, describeState(states.get(againId))) && ok;
+
+  const token = await erpToken();
+  const count = await erpCount(token, 'invoice', inv.invoiceId);
+  return check(count === 1, 'record level', `${count} invoice record(s) with external ID ${inv.invoiceId} in the ERP`) && ok;
+}
+
+/** A payment that arrives before its invoice (SPEC §8.2: "dependency not yet present" is retryable). */
+async function outOfOrder(): Promise<boolean> {
+  const inv = makeInvoice(0);
+  const payment = makePayment(inv, 0);
+  const paymentId = String((payment.data as Json).paymentId);
+  const payId = String(payment.id);
+  const invId = String(inv.event.id);
+  console.log(`Sending payment ${paymentId} BEFORE invoice ${inv.invoiceId} to ${INTEGRATION_URL}`);
+
+  const payReply = await send('billing', payment);
+  if (!ON_AWS) {
+    check(payReply.body.status === 'RETRYING', 'payment first', String(payReply.body.status));
+    console.log('         Locally there is no queue to retry it, so it stays RETRYING. Run with --aws to see the retry.');
+    console.log('         (A local automated version: npm run test:e2e -w integration-service, worker.e2e-spec.ts)');
+    return false;
+  }
+  // Wait until the worker has tried the payment and found no invoice, so the order is really "payment first".
+  const first = await waitForStatus(payId, 'RETRYING');
+  let ok = check(first?.error === 'INVOICE_NOT_FOUND', 'payment tried first', describeState(first));
+
+  const invReply = await send('billing', inv.event);
+  console.log(`  invoice sent (${invReply.status}); the payment comes back about 10 s after its failed try`);
+
+  const states = await settle([invId, payId], new Map());
+  ok = check(states.get(invId)?.status === 'SUCCEEDED', 'invoice', describeState(states.get(invId))) && ok;
+  const pay = states.get(payId);
+  ok = check(pay?.status === 'SUCCEEDED' && (pay.attempts ?? 0) > 1, 'payment', describeState(pay)) && ok;
+
+  const token = await erpToken();
+  const record = await erpGet(token, 'invoice', inv.invoiceId);
+  ok = check(record?.status === 'paidInFull', 'invoice in the ERP', String(record?.status ?? 'missing')) && ok;
+  const count = await erpCount(token, 'customerPayment', paymentId);
+  return check(count === 1, 'payments in the ERP', String(count)) && ok;
+}
+
+/** Requests that must be refused before anything is logged. */
+async function badSignature(): Promise<boolean> {
+  const inv = makeInvoice(0);
+  console.log(`Sending badly signed webhooks to ${INTEGRATION_URL}`);
+  const wrong = await send('billing', inv.event, { secret: 'not-the-real-secret' });
+  let ok = check(wrong.status === 401, 'wrong secret', String(wrong.status));
+  const old = await send('billing', inv.event, { timestamp: Math.floor(Date.now() / 1000) - 600 });
+  ok = check(old.status === 401, 'timestamp 10 minutes old', String(old.status)) && ok;
+  const swapped = await send('procurement', inv.event, { secret: SECRETS.billing });
+  ok = check(swapped.status === 401, "signed with the other source's secret", String(swapped.status)) && ok;
+
+  // Nothing was logged, so the event ID is still unused: sent properly now it must be 202, not "200 duplicate".
+  const good = await send('billing', inv.event);
+  return check(good.status === 202, 'same event correctly signed', `${good.status} (nothing was logged before)`) && ok;
+}
+
+/** Bodies that are signed correctly but aren't valid events. */
+async function badPayload(): Promise<boolean> {
+  console.log(`Sending invalid payloads to ${INTEGRATION_URL}`);
+  const inv = makeInvoice(0);
+  const noLines = { ...inv.event, data: { ...(inv.event.data as Json), lines: undefined } };
+  const schema = await send('billing', noLines);
+  let ok = check(schema.status === 400 && schema.body.error === 'INVALID_PAYLOAD', 'missing lines', `${schema.status} ${String(schema.body.error)}`);
+  const broken = await send('billing', {}, { raw: '{"id": "evt_broken", "type": ' });
+  ok = check(broken.status === 400 && broken.body.error === 'INVALID_JSON', 'not JSON', `${broken.status} ${String(broken.body.error)}`) && ok;
+  const wrongRoute = await send('procurement', makeInvoice(1).event);
+  ok = check(
+    wrongRoute.status === 400 && wrongRoute.body.error === 'WRONG_SOURCE',
+    'invoice sent to /procurement',
+    `${wrongRoute.status} ${String(wrongRoute.body.error)}`,
+  ) && ok;
+  if (ON_AWS) {
+    const ids = [schema, broken, wrongRoute].map((r) => String(r.body.syncId));
+    const states = readSyncLog(ids);
+    ok = check(
+      ids.every((id) => states.get(id)?.status === 'REJECTED'),
+      'logged as REJECTED',
+      ids.map((id) => describeState(states.get(id))).join(' | '),
+    ) && ok;
+  }
+  return ok;
+}
+
+/** A bill whose expense category has no ERP account: permanent, so FAILED after one try. */
+async function unknownCategory(): Promise<boolean> {
+  const bill = makeBill(0);
+  const data = bill.event.data as Json;
+  data.lines = [{ expenseCategory: 'YACHTS', description: 'Team offsite', amount: 9000 }];
+  const id = String(bill.event.id);
+  console.log(`Sending bill ${bill.billNumber} with expense category YACHTS to ${INTEGRATION_URL}`);
+  const reply = await send('procurement', bill.event);
+  let ok = check(reply.status === 202, 'accepted', String(reply.status));
+  const state = (await settle([id], new Map([[id, reply]]))).get(id);
+  ok = check(state?.status === 'FAILED' && (!ON_AWS || state.attempts === 1), 'failed permanently, not retried', describeState(state)) && ok;
+  if (ON_AWS) ok = check(state?.error === 'UNKNOWN_EXPENSE_CATEGORY', 'error code', String(state?.error)) && ok;
+  const token = await erpToken();
+  const vendor = await erpGet(token, 'vendor', String((data.vendor as Json).id));
+  return check(!vendor, 'nothing written to the ERP', vendor ? 'vendor was created!' : 'no vendor, no bill') && ok;
+}
+
+const COMMANDS: Record<string, () => Promise<boolean>> = {
+  happy,
+  one,
+  duplicates,
+  'out-of-order': outOfOrder,
+  'bad-signature': badSignature,
+  'bad-payload': badPayload,
+  'unknown-category': unknownCategory,
+};
 
 const command = args.find((a, i) => !a.startsWith('--') && args[i - 1] !== '--delay');
 const run = command ? COMMANDS[command] : undefined;
 if (!run) {
-  console.error(`Usage: npm run simulate -- <${Object.keys(COMMANDS).join('|')}>`);
+  console.error(`Usage: npm run simulate -- <${Object.keys(COMMANDS).join('|')}> [--aws] [--delay <ms>]`);
   process.exit(2);
 }
 try {
@@ -355,6 +613,8 @@ try {
   process.exit(ok ? 0 : 1);
 } catch (err) {
   console.error(err instanceof Error ? err.message : err);
+  const hint = loginHint(err);
+  if (hint) console.error(hint);
   if (err instanceof TypeError && String(err.cause ?? '').includes('ECONNREFUSED')) {
     console.error('Is the integration service (and the mock ERP) running?');
   }

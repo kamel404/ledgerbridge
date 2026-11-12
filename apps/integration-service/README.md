@@ -13,9 +13,11 @@ Run from the repo root (`-w integration-service` targets this app) or from this 
 | `npm run test:e2e -w integration-service` | HTTP tests against the full app plus an in-process mock ERP (`test/*.e2e-spec.ts`) |
 | `npm run typecheck -w integration-service` | TypeScript check, no output |
 | `npm run build:lambda -w integration-service` | Lambda bundle in `dist-lambda/` |
-| `npm run simulate -- happy` (root) | Fake source apps: signed webhooks, then checks the ERP |
+| `npm run simulate -- <command> [--aws]` (root) | Fake source apps: `happy`, `duplicates`, `out-of-order`, `bad-signature`, `bad-payload`, `unknown-category`. Header of `scripts/simulate.ts` explains each |
 
-## How an event flows (Phase 2, no queue yet)
+## How an event flows
+
+On AWS the webhook and the worker are two Lambdas with the SQS queue between them. Locally (no `SYNC_QUEUE_URL`) the `InlineDispatcher` calls the worker straight away, so the same code runs in one process.
 
 ```
 POST /webhooks/{billing|procurement}
@@ -27,7 +29,10 @@ IngestService              not JSON / fails zod / wrong source → REJECTED + 40
                            event ID seen before → 200 { duplicate: true }
                            else RECEIVED, then dispatch
   ▼
-InlineDispatcher           (Phase 3: SQS dispatcher instead)
+SqsDispatcher (AWS)        sends {eventId, event} to SyncQueue, webhook answers 202
+  or InlineDispatcher      (local) runs the worker right away
+  ▼
+lambda/worker.ts (AWS)     SQS batch of up to 5 → SqsBatchHandler, one message at a time
   ▼
 SyncWorker                 already SUCCEEDED → skip; PROCESSING, attempts + 1
   ▼
@@ -38,6 +43,10 @@ FlowRegistry.processEvent  invoice.created → InvoiceCreatedHandler
 ErpClient                  OAuth token cache, PUT /{type}/eid:{externalId}, 10 s timeout
   ▼
 SUCCEEDED | RETRYING (retryable error) | FAILED (permanent error)
+  ▼
+SqsBatchHandler (AWS)      SUCCEEDED / FAILED → message deleted
+                           RETRYING → reported in batchItemFailures, back on the queue after
+                                      Retry-After, or 10 s / 30 s / 90 s; 4th failure → DLQ
 ```
 
 ## Where things are
@@ -49,9 +58,10 @@ SUCCEEDED | RETRYING (retryable error) | FAILED (permanent error)
 | `src/erp-client/` | `ErpClient` and `erp-errors.ts` (HTTP status → retryable/permanent) |
 | `src/errors/` | `RetryableError`, `PermanentError`, `classifyError` |
 | `src/lookups/` | SKU → item, expense category → account, currency → currency ID |
-| `src/sync-log/` | `SyncRecord`, repository interface, in-memory repository, `SyncLogService` |
-| `src/worker/` | `SyncWorker`: one event in, status out. Phase 4 wraps it in the SQS handler |
-| `src/secrets/` | `SecretsProvider` interface, env-var version (Secrets Manager in Phase 4) |
+| `src/sync-log/` | `SyncRecord`, repository interface, in-memory and DynamoDB repositories, `SyncLogService` |
+| `src/worker/` | `SyncWorker` (one event in, status out), `SqsBatchHandler` (SQS batch → worker, retry delays), `WorkerAppModule` (the worker Lambda's root module) |
+| `src/lambda/` | Lambda entry points: `http.ts` (API Gateway → Nest app), `worker.ts` (SQS → `SqsBatchHandler`) |
+| `src/secrets/` | `SecretsProvider` interface, env-var version (local) and Secrets Manager version (AWS) |
 | `src/config/` | Non-secret settings from env vars (`ERP_BASE_URL`, timeouts) |
 
 ## Adding an event type
@@ -80,7 +90,8 @@ curl -s -X POST localhost:3000/webhooks/procurement \
 - `src/app.factory.ts` builds the Nest app. Both `src/main.ts` (local server) and `src/lambda/http.ts` (Lambda) use it, so they behave the same, including the raw-body setup for webhooks.
 - `src/lambda/http.ts` wraps the app with `@codegenie/serverless-express` and caches it between invocations (cold start once, then warm).
 - `npm run build:lambda` bundles with **rspack**, not webpack: Nest 12's webpack builder refuses ESM projects. rspack keeps the decorator metadata that dependency injection needs. Settings and reasons are in `rspack.config.cjs`.
-- Output: `dist-lambda/http.js`, one file with every dependency inside, plus a `package.json` marking it CommonJS. Lambda handler: `http.handler`.
+- Output: `dist-lambda/http.js` and `dist-lambda/worker.js`, one file per Lambda with every dependency inside, plus a `package.json` marking them CommonJS. Lambda handlers: `http.handler`, `worker.handler`.
+- `src/lambda/worker.ts` starts Nest with `createApplicationContext` (dependency injection, no HTTP server) and caches it like the HTTP one.
 
 Try the bundle locally without AWS (from the repo root, Git Bash):
 
