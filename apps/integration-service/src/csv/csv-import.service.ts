@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { EventIntakeService } from '../intake/event-intake.service.js';
+import { withLogContext } from '../observability/log-context.js';
 import { errorsCsv, readBillCsv } from './bill-csv.js';
 
 export interface CsvImportSummary {
@@ -31,7 +32,11 @@ export class CsvImportService {
     let accepted = 0;
     let duplicates = 0;
     for (const event of result.events) {
-      const outcome = await this.intake.accept({ event, source: 'csv', flow: 'P2P' });
+      const outcome = await withLogContext({ eventId: event.id, flow: 'P2P', eventType: event.type }, async () => {
+        const result = await this.intake.accept({ event, source: 'csv', flow: 'P2P' });
+        this.logger.log(result === 'accepted' ? `Bill ${event.data.billNumber} queued` : `Bill ${event.data.billNumber} already imported`);
+        return result;
+      });
       if (outcome === 'accepted') accepted++;
       else duplicates++;
     }

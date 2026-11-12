@@ -18,7 +18,8 @@ async function setup(status?: 'RETRYING' | 'SUCCEEDED') {
       lastError: { code: 'ERP_SERVICE_UNAVAILABLE', message: 'down', class: 'retryable' },
     });
   }
-  return { syncLog, handler: new DeadLetterHandler(syncLog), body: JSON.stringify({ eventId: event.id, event }) };
+  const metrics = { dead: vi.fn() };
+  return { syncLog, metrics, handler: new DeadLetterHandler(syncLog, metrics), body: JSON.stringify({ eventId: event.id, event }) };
 }
 
 describe('DeadLetterHandler', () => {
@@ -28,12 +29,14 @@ describe('DeadLetterHandler', () => {
     const rec = await t.syncLog.get('evt_inv_1');
     expect(rec).toMatchObject({ status: 'DEAD', attempts: 4, lastError: { code: 'ERP_SERVICE_UNAVAILABLE' } });
     expect(rec!.history.at(-1)).toMatchObject({ status: 'DEAD', note: 'DLQ after 4 attempt(s)' });
+    expect(t.metrics.dead).toHaveBeenCalledWith('O2C');
   });
 
   it('leaves an event that already succeeded alone', async () => {
     const t = await setup('SUCCEEDED');
     await t.handler.handle([record('m1', t.body)]);
     expect((await t.syncLog.get('evt_inv_1'))!.status).toBe('SUCCEEDED');
+    expect(t.metrics.dead).not.toHaveBeenCalled();
   });
 
   it('drops messages it cannot use without failing the batch', async () => {

@@ -12,6 +12,8 @@
 //   npm run simulate -- unknown-category  a bill with an unmapped category -> FAILED, not retried
 //   npm run simulate -- dead --aws        a payment whose invoice never comes: 4 failed tries,
 //                                         dead-letter queue, status DEAD (takes ~4 minutes)
+//   npm run simulate -- outage --aws      with chaos on (`npm run chaos -- 1`): 3 invoices that
+//                                         all end DEAD, which fires the DeadLetters alarm
 //   npm run simulate -- csv --aws         uploads a vendor-bill CSV with some bad rows to the
 //                                         import bucket; checks the bills, the errors file,
 //                                         then uploads it again (nothing new may appear)
@@ -626,6 +628,39 @@ async function dead(): Promise<boolean> {
   return ok;
 }
 
+/**
+ * The ERP is down (chaos at 100%): every event is retried 4 times, lands in
+ * the DLQ and becomes DEAD. The DeadLetters alarm should then email you.
+ * Turn chaos on first (`npm run chaos -- 1`) and off afterwards.
+ */
+async function outage(): Promise<boolean> {
+  if (!ON_AWS) {
+    console.error('Needs the deployed queue, DLQ and alarms, so use --aws.');
+    return false;
+  }
+  console.log('Expecting chaos to be ON (npm run chaos -- 1). Sending 3 invoices.');
+  const invoices = Array.from({ length: 3 }, (_, i) => makeInvoice(i));
+  const ids: string[] = [];
+  for (const inv of invoices) {
+    const res = await send('billing', inv.event);
+    ids.push(String(inv.event.id));
+    if (res.status !== 202) console.log(`  unexpected ${res.status}: ${JSON.stringify(res.body)}`);
+  }
+  console.log('  each is retried after 10 s, 30 s, 90 s and 90 s, then moves to the DLQ (about 4 minutes)');
+  const states = await settle(ids, new Map(), 8 * 60_000);
+  const ok = check(
+    ids.every((id) => states.get(id)?.status === 'DEAD'),
+    'all DEAD',
+    ids.map((id) => describeState(states.get(id))).join(' | '),
+  );
+  if (ids.some((id) => states.get(id)?.status === 'SUCCEEDED')) {
+    console.log('         Some succeeded: is chaos really on? (npm run chaos -- 1)');
+  }
+  console.log('  Now: CloudWatch -> Alarms shows LedgerBridge-DeadLetters "In alarm" within a few minutes,');
+  console.log('  and the alarm email arrives. Then turn chaos off: npm run chaos -- 0');
+  return ok;
+}
+
 // ---------------------------------------------------------------------------
 // CSV import (AWS only: the import is triggered by S3)
 // ---------------------------------------------------------------------------
@@ -744,6 +779,7 @@ const COMMANDS: Record<string, () => Promise<boolean>> = {
   'bad-payload': badPayload,
   'unknown-category': unknownCategory,
   dead,
+  outage,
   csv,
 };
 

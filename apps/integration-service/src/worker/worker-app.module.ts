@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '../config/config.module.js';
+import { ObservabilityModule } from '../observability/observability.module.js';
 import { SecretsModule } from '../secrets/secrets.module.js';
 import { WorkerModule } from './worker.module.js';
 
@@ -8,6 +9,6 @@ import { WorkerModule } from './worker.module.js';
  * HTTP controllers (it's started with createApplicationContext, no server).
  */
 @Module({
-  imports: [ConfigModule, SecretsModule, WorkerModule],
+  imports: [ConfigModule, ObservabilityModule, SecretsModule, WorkerModule],
 })
 export class WorkerAppModule {}

@@ -56,6 +56,7 @@ SqsBatchHandler (AWS)      SUCCEEDED / FAILED → message deleted
 | `src/ingest/` | Webhook controller, signature guard + `signature.ts` (HMAC, timestamp), raw-body setup, `EventDispatcher`, `SqsDispatcher` |
 | `src/intake/` | `EventIntakeService`: dedup + `RECEIVED` + dispatch, shared by webhooks and CSV; `IntakeModule` picks SQS or inline |
 | `src/csv/` | CSV reader/writer, vendor-bill rules (`bill-csv.ts`: validate, group, deterministic IDs, errors file), `CsvImportService`, `CsvFileHandler` (S3 moves) |
+| `src/observability/` | `JsonLogger` (Nest → Powertools JSON on Lambda), `withLogContext` (eventId/flow/eventType/attempt on every line), `redact`, `SyncMetrics` (Powertools EMF on Lambda, no-op locally) |
 | `src/dlq/` | `DeadLetterHandler`: marks events that reach the DLQ `DEAD` |
 | `src/flows/` | `FlowHandler` interface, `FlowRegistry`, `o2c/` (invoice, payment), `p2p/` (bill). Mappers are pure functions |
 | `src/erp-client/` | `ErpClient` and `erp-errors.ts` (HTTP status → retryable/permanent) |

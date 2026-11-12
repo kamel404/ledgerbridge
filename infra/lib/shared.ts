@@ -32,6 +32,8 @@ export interface NestFunctionProps {
  *   bundle is plain JavaScript, so the CPU type doesn't matter.
  * - Its own log group with 7-day retention. By default Lambda logs are kept
  *   forever and billed per GB stored.
+ * - integration-service Lambdas get the Powertools settings: JSON logs with
+ *   service "ledgerbridge" at INFO level, metrics in namespace LedgerBridge.
  * - CDK gives every Function its own IAM role. Stacks then add only the
  *   permissions it needs with grant*() calls.
  */
@@ -49,7 +51,15 @@ export class NestFunction extends lambda.Function {
       code: lambdaBundle(props.app),
       memorySize: props.memorySize ?? 512,
       timeout: props.timeout ?? cdk.Duration.seconds(15),
-      environment: { NODE_ENV: 'production', ...props.environment },
+      environment: {
+        NODE_ENV: 'production',
+        ...(props.app === 'integration-service' && {
+          POWERTOOLS_SERVICE_NAME: 'ledgerbridge',
+          POWERTOOLS_METRICS_NAMESPACE: 'LedgerBridge',
+          POWERTOOLS_LOG_LEVEL: 'INFO',
+        }),
+        ...props.environment,
+      },
       logGroup,
     });
   }

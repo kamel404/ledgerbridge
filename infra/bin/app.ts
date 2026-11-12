@@ -22,6 +22,10 @@ function required(name: string): string {
 }
 
 const app = new cdk.App();
+
+/** `-c chaosErrorRate=1` (see `npm run chaos`): the deployed mock ERP answers that share of requests with 503. */
+const chaosErrorRate = Number(app.node.tryGetContext('chaosErrorRate') ?? 0);
+if (!(chaosErrorRate >= 0 && chaosErrorRate <= 1)) throw new Error('chaosErrorRate must be between 0 and 1');
 const env = { account: process.env.CDK_DEFAULT_ACCOUNT, region: REGION };
 
 const mockErp = new MockErpStack(app, 'MockErpStack', {
@@ -30,15 +34,18 @@ const mockErp = new MockErpStack(app, 'MockErpStack', {
   clientId: required('MOCK_ERP_CLIENT_ID'),
   clientSecret: required('MOCK_ERP_CLIENT_SECRET'),
   jwtSecret: required('MOCK_ERP_JWT_SECRET'),
+  chaosErrorRate,
 });
 
 new LedgerBridgeStack(app, 'LedgerBridgeStack', {
   env,
-  description: 'LedgerBridge: webhook ingest, sync log, queue, worker',
+  description: 'LedgerBridge: webhook ingest, CSV import, sync log, queue, worker, alarms',
   webhookSecretName: required('WEBHOOK_SECRET_NAME'),
   erpSecretName: required('ERP_SECRET_NAME'),
   // The worker talks to the mock ERP. Pointing at a real NetSuite = pass its URL instead.
   erpBaseUrl: mockErp.url,
+  // Optional: set ALARM_EMAIL in .env.aws to get alarm emails.
+  alarmEmail: process.env.ALARM_EMAIL || undefined,
 });
 
 // Tags show up in the Billing console, so you can see what this project costs.

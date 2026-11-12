@@ -24,6 +24,7 @@
     "cdk": "npm run cdk -w infra --",
     "synth": "npm run build:lambda && npm run cdk -w infra -- synth --profile ledgerbridge",
     "deploy": "npm run build:lambda && npm run cdk -w infra -- deploy --all --outputs-file cdk-outputs.json --profile ledgerbridge",
-    "destroy": "npm run cdk -w infra -- destroy --all --profile ledgerbridge"
+    "destroy": "npm run cdk -w infra -- destroy --all --profile ledgerbridge",
+    "chaos": "node --no-warnings scripts/chaos.ts"
   }
 }

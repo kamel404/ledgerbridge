@@ -11,6 +11,11 @@ export interface MockErpStackProps extends cdk.StackProps {
   readonly clientSecret: string;
   /** Key the mock signs its JWT access tokens with. */
   readonly jwtSecret: string;
+  /**
+   * Share of ERP requests answered with 503 (0 to 1), for testing alarms.
+   * Set per deploy with `npm run chaos -- <rate>`; a normal deploy resets it to 0.
+   */
+  readonly chaosErrorRate?: number;
 }
 
 /**
@@ -48,6 +53,9 @@ export class MockErpStack extends cdk.Stack {
         // LedgerBridge's own secrets live in Secrets Manager.
         MOCK_ERP_CLIENT_SECRET: props.clientSecret,
         MOCK_ERP_JWT_SECRET: props.jwtSecret,
+        // An env var, not PUT /mock/chaos: that only changes the one Lambda
+        // container that happens to answer, so other copies keep working.
+        CHAOS_ERROR_RATE: String(props.chaosErrorRate ?? 0),
       },
     });
     table.grantReadWriteData(fn);

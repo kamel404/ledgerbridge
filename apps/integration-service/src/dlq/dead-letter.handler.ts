@@ -2,6 +2,9 @@ import { Logger, Module } from '@nestjs/common';
 import type { SyncStatus } from '@ledgerbridge/shared';
 import type { SQSBatchResponse, SQSRecord } from 'aws-lambda';
 import { ConfigModule } from '../config/config.module.js';
+import { withLogContext } from '../observability/log-context.js';
+import { ObservabilityModule } from '../observability/observability.module.js';
+import type { SyncMetrics } from '../observability/sync-metrics.js';
 import { SyncLogModule } from '../sync-log/sync-log.module.js';
 import type { SyncLogService } from '../sync-log/sync-log.service.js';
 
@@ -23,7 +26,10 @@ const FINAL: ReadonlySet<SyncStatus> = new Set(['SUCCEEDED', 'FAILED', 'DEAD', '
 export class DeadLetterHandler {
   private readonly logger = new Logger(DeadLetterHandler.name);
 
-  constructor(private readonly syncLog: Pick<SyncLogService, 'get' | 'transition'>) {}
+  constructor(
+    private readonly syncLog: Pick<SyncLogService, 'get' | 'transition'>,
+    private readonly metrics: Pick<SyncMetrics, 'dead'>,
+  ) {}
 
   async handle(records: SQSRecord[]): Promise<SQSBatchResponse> {
     const batchItemFailures: SQSBatchResponse['batchItemFailures'] = [];
@@ -46,17 +52,22 @@ export class DeadLetterHandler {
       this.logger.error(`Dead message ${record.messageId} has no eventId (${record.body.length} bytes), dropped`);
       return;
     }
-    const current = await this.syncLog.get(eventId);
-    if (!current) {
-      this.logger.warn(`Dead message for ${eventId}, but there is no sync record`);
-      return;
-    }
-    if (FINAL.has(current.status)) {
-      this.logger.log(`${eventId} is already ${current.status}, not marking it DEAD`);
-      return;
-    }
-    await this.syncLog.transition(eventId, 'DEAD', {}, `DLQ after ${current.attempts} attempt(s)`);
-    this.logger.warn(`${eventId} ${current.eventType ?? ''} is DEAD (${current.lastError?.code ?? 'no error recorded'})`);
+    await withLogContext({ eventId }, async () => {
+      const current = await this.syncLog.get(eventId);
+      if (!current) {
+        this.logger.warn('Dead message, but there is no sync record');
+        return;
+      }
+      await withLogContext({ flow: current.flow, eventType: current.eventType, attempt: current.attempts }, async () => {
+        if (FINAL.has(current.status)) {
+          this.logger.log(`Already ${current.status}, not marking it DEAD`);
+          return;
+        }
+        await this.syncLog.transition(eventId, 'DEAD', {}, `DLQ after ${current.attempts} attempt(s)`);
+        this.metrics.dead(current.flow);
+        this.logger.warn(`DEAD after ${current.attempts} attempt(s): ${current.lastError?.code ?? 'no error recorded'}`);
+      });
+    });
   }
 }
 
@@ -69,6 +80,6 @@ function readEventId(body: string): string | undefined {
   }
 }
 
-/** Root module of the DLQ Lambda: only config and the sync log. */
-@Module({ imports: [ConfigModule, SyncLogModule] })
+/** Root module of the DLQ Lambda: config, the sync log and metrics. */
+@Module({ imports: [ConfigModule, ObservabilityModule, SyncLogModule] })
 export class DlqAppModule {}

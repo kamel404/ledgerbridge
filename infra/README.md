@@ -39,6 +39,7 @@ Both are in Region **eu-north-1**, the only Region our AWS project allows.
 | `npm run cdk -- diff --profile ledgerbridge` | Shows what a deploy would change |
 | `npm run deploy` | Builds the bundles and deploys both stacks. Writes the URLs to `infra/cdk-outputs.json` |
 | `npm run destroy` | Deletes both stacks (tables and their data included). Then `npm run aws:secrets -- --delete` removes the secrets |
+| `npm run chaos -- <0..1>` | Redeploys only the mock ERP with that share of requests failing (503). `npm run chaos -- 0` (or any `npm run deploy`) turns it off |
 | `npm test -w infra` | Checks the templates (DLQ after 4 tries, 7-day logs, permissions, ...) without deploying |
 
 The first deploy in an account needs `npm run cdk -- bootstrap --profile ledgerbridge` once. It creates a small S3 bucket and IAM roles that CDK uses to upload the Lambda code.
@@ -59,6 +60,8 @@ If AWS says your credentials expired: `aws login --profile ledgerbridge` (they l
 - **ERP URL**: the worker gets the mock ERP's URL from `MockErpStack` (a cross-stack reference). Pointing at a real NetSuite later means passing its URL instead.
 - **Secrets**: LedgerBridge's secrets live in Secrets Manager (`ledgerbridge/webhooks` for ingest, `ledgerbridge/erp` for the worker). Each Lambda gets only the secret's name. The mock ERP's own client secret is a Lambda environment variable, acceptable only because it's the fake ERP.
 - **Secret lifecycle**: `npm run aws:secrets` creates the secrets outside CDK, so their values never appear in a CloudFormation template; the stack only references them by name.
+- **Monitoring** (`lib/monitoring.ts`): SNS topic `LedgerBridgeAlarms` with an email subscription (`ALARM_EMAIL` in `.env.aws`; confirm the link AWS emails you). Alarms, each notifying on ALARM and OK: `DeadLetters` (a message arrived in the DLQ), `SyncFailures` (≥ 5 permanent failures in 5 min), `WorkerErrors` (worker Lambda errors 2 minutes in a row), `QueueBacklog` (oldest message > 10 min), `CsvImportErrors`. Dashboard **LedgerBridge** and saved Logs Insights query *LedgerBridge/Trace one event*.
+- **Logs and metrics**: the LedgerBridge Lambdas write JSON logs (Powertools, service `ledgerbridge`) and custom metrics in namespace `LedgerBridge` with dimensions `service` + `flow`.
 - **Costs**: DynamoDB on demand, SQS and API Gateway per request, logs kept 7 days, API throttled at 20 requests/s. Idle cost is about $0.80/month (two secrets at $0.40 each).
 - **Delete everything**: tables and log groups use `RemovalPolicy.DESTROY`, so `cdk destroy` leaves nothing behind. Fine for a learning project; a real system would keep (`RETAIN`) its data tables.
 - **No ERP calls in ingest**: on AWS, ingest only writes the sync record and sends to SQS (SPEC §8.1); the worker does the ERP calls. Locally the same code processes events inline because no queue is configured.

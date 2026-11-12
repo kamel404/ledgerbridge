@@ -2,7 +2,9 @@ import { ChangeMessageVisibilityCommand, type SQSClient } from '@aws-sdk/client-
 import { Logger } from '@nestjs/common';
 import { parseEvent, type LedgerEvent } from '@ledgerbridge/shared';
 import type { SQSBatchResponse, SQSRecord } from 'aws-lambda';
+import { EVENT_FLOW } from '@ledgerbridge/shared';
 import type { SyncMessage } from '../ingest/sqs-dispatcher.js';
+import { withLogContext } from '../observability/log-context.js';
 import type { SyncWorker, WorkOutcome } from './sync-worker.js';
 
 /**
@@ -77,6 +79,7 @@ export class SqsBatchHandler {
     for (const record of records) {
       if (!(await this.handleOne(record))) batchItemFailures.push({ itemIdentifier: record.messageId });
     }
+    if (batchItemFailures.length) this.logger.log(`Batch of ${records.length}: ${batchItemFailures.length} back to the queue`);
     return { batchItemFailures };
   }
 
@@ -92,20 +95,28 @@ export class SqsBatchHandler {
       return false;
     }
 
+    const { eventId, event } = message;
+    return withLogContext({ eventId, eventType: event.type, flow: EVENT_FLOW[event.type], receiveCount }, () =>
+      this.process(record, eventId, event, receiveCount),
+    );
+  }
+
+  /** Runs the worker for one readable message. Returns true when the message can be deleted. */
+  private async process(record: SQSRecord, eventId: string, event: LedgerEvent, receiveCount: number): Promise<boolean> {
     let outcome: WorkOutcome;
     try {
-      outcome = await this.worker.process(message.eventId, message.event);
+      outcome = await this.worker.process(eventId, event);
     } catch (err) {
       // e.g. DynamoDB unavailable: the sync log couldn't even be updated.
-      this.logger.error(`Worker crashed on ${message.eventId} (receive ${receiveCount})`, err);
+      this.logger.error(`Worker crashed (receive ${receiveCount})`, err);
       return false;
     }
 
+    // eventId, flow, eventType, attempt are on the line already (log context).
     this.logger.log(
-      `${message.eventId} ${message.event.type}: ${outcome.status}` +
+      outcome.status +
         (outcome.skipped ? ' (already done, skipped)' : '') +
-        (outcome.error ? ` ${outcome.error.code}` : '') +
-        ` (receive ${receiveCount})`,
+        (outcome.error ? ` ${outcome.error.code}: ${outcome.error.message}` : ''),
     );
     if (outcome.status !== 'RETRYING') return true;
 
@@ -114,7 +125,7 @@ export class SqsBatchHandler {
       await this.changeVisibility(record, delay);
     } catch (err) {
       // Not fatal: the message still comes back, just after the queue's default timeout.
-      this.logger.warn(`Could not set a ${delay}s retry delay on ${message.eventId}: ${String(err)}`);
+      this.logger.warn(`Could not set a ${delay}s retry delay: ${String(err)}`);
     }
     return false;
   }

@@ -1,7 +1,9 @@
-import { Injectable, Logger } from '@nestjs/common';
-import type { LedgerEvent, SyncStatus } from '@ledgerbridge/shared';
+import { Inject, Injectable, Logger } from '@nestjs/common';
+import { EVENT_FLOW, type LedgerEvent, type SyncStatus } from '@ledgerbridge/shared';
 import { classifyError, RetryableError, type ErrorSummary } from '../errors/integration-errors.js';
 import { FlowRegistry } from '../flows/flow-registry.js';
+import { addLogContext } from '../observability/log-context.js';
+import { SYNC_METRICS, type SyncMetrics } from '../observability/sync-metrics.js';
 import { SyncLogService } from '../sync-log/sync-log.service.js';
 
 export interface WorkOutcome {
@@ -31,16 +33,23 @@ export class SyncWorker {
   constructor(
     private readonly flows: FlowRegistry,
     private readonly syncLog: SyncLogService,
+    @Inject(SYNC_METRICS) private readonly metrics: SyncMetrics,
   ) {}
 
   async process(eventId: string, event: LedgerEvent): Promise<WorkOutcome> {
     const record = await this.syncLog.get(eventId);
     if (record?.status === 'SUCCEEDED') return { status: 'SUCCEEDED', skipped: true };
 
-    await this.syncLog.transition(eventId, 'PROCESSING', { attempts: (record?.attempts ?? 0) + 1 });
+    const attempt = (record?.attempts ?? 0) + 1;
+    addLogContext({ attempt });
+    await this.syncLog.transition(eventId, 'PROCESSING', { attempts: attempt });
 
+    const flow = EVENT_FLOW[event.type];
+    const started = performance.now();
+    const elapsed = () => Math.round(performance.now() - started);
     try {
       const result = await this.flows.processEvent(event);
+      this.metrics.attempt(flow, 'SUCCEEDED', elapsed());
       await this.syncLog.transition(eventId, 'SUCCEEDED', {
         erpRecordType: result.erpRecordType,
         erpRecordId: result.erpRecordId,
@@ -50,6 +59,7 @@ export class SyncWorker {
     } catch (err) {
       const error = classifyError(err);
       const status = error.class === 'retryable' ? 'RETRYING' : 'FAILED';
+      this.metrics.attempt(flow, status, elapsed());
       if (error.code === 'UNEXPECTED_ERROR') this.logger.error(`Unexpected error on ${eventId}`, err);
       await this.syncLog.transition(eventId, status, { lastError: error }, error.code);
       return {

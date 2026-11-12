@@ -9,6 +9,7 @@ import s3n from 'aws-cdk-lib/aws-s3-notifications';
 import secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import sqs from 'aws-cdk-lib/aws-sqs';
 import type { Construct } from 'constructs';
+import { Monitoring } from './monitoring.ts';
 import { NestFunction } from './shared.ts';
 
 export interface LedgerBridgeStackProps extends cdk.StackProps {
@@ -18,6 +19,8 @@ export interface LedgerBridgeStackProps extends cdk.StackProps {
   readonly erpSecretName: string;
   /** Where the ERP lives: the mock ERP stack's URL, or a real NetSuite later. Not a secret. */
   readonly erpBaseUrl: string;
+  /** Alarm emails go here (ALARM_EMAIL in .env.aws). Optional: without it nobody is notified. */
+  readonly alarmEmail?: string;
 }
 
 /** Worker Lambda timeout. The queue's visibility timeout is derived from it. */
@@ -214,6 +217,16 @@ export class LedgerBridgeStack extends cdk.Stack {
       // At most 20 requests/s (bursts of 40). Beyond that API Gateway answers
       // 429 itself, without running (or billing) the Lambda.
       throttle: { rateLimit: 20, burstLimit: 40 },
+    });
+
+    // ---- Alarms, dashboard, saved log query (SPEC §11) ------------------------------
+    new Monitoring(this, 'Monitoring', {
+      queue,
+      dlq,
+      worker,
+      csvImport,
+      functions: { ingest, worker, csvImport, dlqHandler },
+      alarmEmail: props.alarmEmail,
     });
 
     new cdk.CfnOutput(this, 'ApiUrl', { value: api.apiEndpoint, description: 'Send webhooks to <ApiUrl>/webhooks/<source>' });

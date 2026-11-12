@@ -2,6 +2,7 @@ import { configure as serverlessExpress } from '@codegenie/serverless-express';
 import type { Express } from 'express';
 import type { APIGatewayProxyHandlerV2, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { createApp } from '../app.factory.js';
+import { addLambdaContext } from '../observability/json-logger.js';
 
 // Lambda entry point for HTTP routes behind API Gateway.
 // The app is built once per container (cold start) and reused while warm.
@@ -16,6 +17,7 @@ async function bootstrap(): Promise<ProxyHandler> {
 }
 
 export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
+  addLambdaContext(context);
   cached ??= await bootstrap();
   return (await cached(event, context, () => undefined)) as APIGatewayProxyResultV2;
 };

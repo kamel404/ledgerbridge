@@ -2,6 +2,7 @@ import { NestFactory } from '@nestjs/core';
 import type { INestApplication } from '@nestjs/common';
 import { AppModule } from './app.module.js';
 import { useRawWebhookBodies } from './ingest/raw-body.js';
+import { nestLoggerOptions } from './observability/json-logger.js';
 
 /**
  * Builds the Nest app. Used by both the local server (main.ts) and the
@@ -9,7 +10,7 @@ import { useRawWebhookBodies } from './ingest/raw-body.js';
  * rawBody keeps the exact request bytes, needed for HMAC signature checks.
  */
 export async function createApp(): Promise<INestApplication> {
-  const app = await NestFactory.create(AppModule, { rawBody: true });
+  const app = await NestFactory.create(AppModule, { rawBody: true, ...nestLoggerOptions() });
   configureApp(app);
   return app;
 }

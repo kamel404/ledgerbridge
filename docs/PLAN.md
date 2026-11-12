@@ -491,13 +491,13 @@ Automated, no AWS: `npm test -w integration-service` (CSV reader, bill rules, fi
 
 ### Tasks
 
-- [ ] Powertools `Logger` in every Lambda; `eventId`, `flow`, `eventType`, `attempt` appended per message
-- [ ] Redaction helper for emails; never log `Authorization` or signature headers
-- [ ] Powertools `Metrics`: `SyncSucceeded`, `SyncFailed`, `SyncRetried`, `SyncDurationMs` (dimension `flow`), namespace `LedgerBridge`
-- [ ] SNS topic + email subscription (address from CDK context/config, not hard-coded)
-- [ ] Alarms: DLQ messages received > 0 (see Concepts); `SyncFailed` ≥ 5 in 5 min; worker errors > 0 for 2 periods; oldest message age > 10 min; (`ReconciliationMismatches` > 0 is added in Phase 8)
-- [ ] CloudWatch dashboard: queue depth, success vs failure, duration p50/p95, dead events
-- [ ] Chaos switch on the deployed mock (env var via CDK context, or an admin endpoint)
+- [x] Powertools `Logger` in every Lambda; `eventId`, `flow`, `eventType`, `attempt` appended per message *(the LedgerBridge Lambdas; the mock ERP keeps Nest's plain logs)*
+- [x] Redaction helper for emails; never log `Authorization` or signature headers
+- [x] Powertools `Metrics`: `SyncSucceeded`, `SyncFailed`, `SyncRetried`, `SyncDurationMs` (dimension `flow`), namespace `LedgerBridge` (plus `SyncDead`)
+- [x] SNS topic + email subscription (address from CDK context/config, not hard-coded) *(`ALARM_EMAIL` in `.env.aws`)*
+- [x] Alarms: DLQ messages received > 0 (see Concepts); `SyncFailed` ≥ 5 in 5 min; worker errors > 0 for 2 periods; oldest message age > 10 min; (`ReconciliationMismatches` > 0 is added in Phase 8). Plus: CSV import errors
+- [x] CloudWatch dashboard: queue depth, success vs failure, duration p50/p95, dead events
+- [x] Chaos switch on the deployed mock (env var via CDK context, or an admin endpoint) *(`npm run chaos -- <rate>`)*
 
 ### Done when
 
@@ -506,6 +506,30 @@ With `CHAOS_ERROR_RATE=1`, messages reach the DLQ and you receive the alarm emai
 ### How to check
 
 Turn chaos on, send a few events, wait: each message is retried 4 times (watch `RETRYING` in DynamoDB), moves to the DLQ, becomes `DEAD`, the alarm turns red in CloudWatch → Alarms, and the email arrives.
+
+1. Once: put `ALARM_EMAIL=you@example.com` in `.env.aws`, `npm run deploy`, then click the link in the "AWS Notification - Subscription Confirmation" email (check spam).
+2. `npm run chaos -- 1` (redeploys only the mock ERP, about a minute).
+3. `npm run simulate -- outage --aws`: 3 invoices, all `DEAD` after about 4 minutes.
+4. Within a few minutes: CloudWatch → Alarms → `LedgerBridge-DeadLetters` is **In alarm** and the email "ALARM: LedgerBridge-DeadLetters" arrives. A minute or two later an "OK" email follows (no new dead events).
+5. `npm run chaos -- 0`.
+
+Also worth a look:
+- CloudWatch → Dashboards → **LedgerBridge** (link in `infra/cdk-outputs.json` as `DashboardUrl`).
+- CloudWatch → Logs Insights → **Queries** (right side) → *LedgerBridge/Trace one event*: paste an event ID from the simulator output, **Run**: every line about that event, from ingest to the worker (and the DLQ handler), in order.
+
+### Decisions made while building it
+
+- **Nest's `Logger` stays in the code; only its output changes.** On Lambda, `JsonLogger` sends every `new Logger(...).log()` call through Powertools, so each line is one JSON object (level, timestamp, service, Lambda request ID, cold start, class name). Locally Nest's readable console logger is unchanged.
+- **Per-event fields come from `AsyncLocalStorage`** (`withLogContext`): the batch handler, ingest, CSV import and DLQ handler set `eventId`/`flow`/`eventType`, the worker adds `attempt`, and every log line written inside, even deep in the ERP client, carries them. Nothing has to pass them around.
+- **Every message is redacted** (emails masked to `a***@domain`, `Authorization`/`Bearer` values, `client_secret=`/`token=`-style pairs), as a safety net on top of not logging payloads or headers at all.
+- **Metrics are single-metric EMF lines**: each data point is one log line CloudWatch turns into a metric, written at once (nothing to flush, no API calls) with its own `flow` dimension. Powertools adds a `service` dimension too, so alarms and graphs use `{service: ledgerbridge, flow}` and add the two flows up with a math expression. A test in integration-service pins the exact dimensions.
+- **Metrics only on Lambda.** Locally and in tests a no-op is injected, so no EMF lines clutter the console.
+- **Chaos is an env var set at deploy time**, not `PUT /mock/chaos`: that endpoint only changes the copy of the mock Lambda that answers it. `npm run deploy` always resets chaos to 0, so it can't be left on by accident.
+- **Five alarms, each also emails on OK.** Missing data counts as fine (quiet nights aren't alarms). The extra CSV alarm exists because a crashed import is otherwise silent.
+- **The SNS topic isn't KMS-encrypted**: CloudWatch can't publish to a topic encrypted with the AWS-managed key, and alarm emails contain no secrets. It does refuse non-HTTPS requests.
+- **The topic policy explicitly allows CloudWatch to publish** (only from this account's `LedgerBridge-*` alarms). Found on the first real test: the alarm went red, but the email failed with "CloudWatch Alarms is not authorized to perform: SNS:Publish". CDK's `enforceSSL` gives the topic its own policy, which *replaces* SNS's default "the account may publish" policy, leaving only a deny. An infra test now checks the allow statement.
+- **When an alarm fires but no email comes**: CloudWatch → Alarms → the alarm → **History**. A failed "Action" entry has the exact error.
+- **Cost:** 5 alarms and 1 dashboard are inside the always-free tier (10 alarms, 3 dashboards). The extra log lines are a few KB per event.
 
 ---
 

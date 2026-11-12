@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '../config/config.module.js';
 import { IntakeModule } from '../intake/intake.module.js';
+import { ObservabilityModule } from '../observability/observability.module.js';
 import { SecretsModule } from '../secrets/secrets.module.js';
 import { CsvImportService } from './csv-import.service.js';
 
@@ -17,6 +18,6 @@ export class CsvModule {}
  * just queues events and never calls the ERP.
  */
 @Module({
-  imports: [ConfigModule, SecretsModule, CsvModule],
+  imports: [ConfigModule, ObservabilityModule, SecretsModule, CsvModule],
 })
 export class CsvAppModule {}

@@ -10,7 +10,8 @@ function setup(processEvent: (event: LedgerEvent) => Promise<unknown>) {
   const repo = new InMemorySyncLogRepository();
   const syncLog = new SyncLogService(repo);
   const flows = { processEvent: vi.fn(processEvent) } as unknown as FlowRegistry;
-  const worker = new SyncWorker(flows, syncLog);
+  const metrics = { attempt: vi.fn(), dead: vi.fn() };
+  const worker = new SyncWorker(flows, syncLog, metrics);
   const event = invoiceEvent();
   const receive = () =>
     syncLog.received({
@@ -21,7 +22,7 @@ function setup(processEvent: (event: LedgerEvent) => Promise<unknown>) {
       businessKey: 'INV-1042',
       payload: event,
     });
-  return { repo, syncLog, flows, worker, event, receive };
+  return { repo, syncLog, flows, worker, event, receive, metrics };
 }
 
 describe('SyncWorker', () => {

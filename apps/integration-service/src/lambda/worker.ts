@@ -1,5 +1,6 @@
 import { SQSClient } from '@aws-sdk/client-sqs';
 import { NestFactory } from '@nestjs/core';
+import { addLambdaContext, nestLoggerOptions } from '../observability/json-logger.js';
 import type { Handler, SQSBatchResponse, SQSEvent } from 'aws-lambda';
 import { SqsBatchHandler, sqsChangeVisibility } from '../worker/sqs-batch-handler.js';
 import { SyncWorker } from '../worker/sync-worker.js';
@@ -11,11 +12,12 @@ import { WorkerAppModule } from '../worker/worker-app.module.js';
 let cached: Promise<SqsBatchHandler> | undefined;
 
 async function bootstrap(): Promise<SqsBatchHandler> {
-  const app = await NestFactory.createApplicationContext(WorkerAppModule);
+  const app = await NestFactory.createApplicationContext(WorkerAppModule, nestLoggerOptions());
   return new SqsBatchHandler(app.get(SyncWorker), sqsChangeVisibility(new SQSClient({})));
 }
 
-export const handler: Handler<SQSEvent, SQSBatchResponse> = async (event) => {
+export const handler: Handler<SQSEvent, SQSBatchResponse> = async (event, context) => {
+  addLambdaContext(context);
   cached ??= bootstrap().catch((err: unknown) => {
     cached = undefined; // try again on the next invocation instead of caching the failure
     throw err;

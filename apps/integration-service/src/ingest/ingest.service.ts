@@ -1,6 +1,7 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { EVENT_FLOW, parseEvent, type Flow, type SyncStatus } from '@ledgerbridge/shared';
 import { EventIntakeService } from '../intake/event-intake.service.js';
+import { withLogContext } from '../observability/log-context.js';
 import type { WebhookSource } from '../secrets/secrets-provider.js';
 import { SyncLogService } from '../sync-log/sync-log.service.js';
 
@@ -24,6 +25,8 @@ export type IngestResult =
  */
 @Injectable()
 export class IngestService {
+  private readonly logger = new Logger(IngestService.name);
+
   constructor(
     private readonly syncLog: SyncLogService,
     private readonly intake: EventIntakeService,
@@ -54,13 +57,16 @@ export class IngestService {
       );
     }
 
-    if ((await this.intake.accept({ event, source, flow })) === 'duplicate') {
-      return { httpStatus: 200, body: { syncId: event.id, duplicate: true } };
-    }
-
-    // With the inline dispatcher the event is already processed; report where it ended.
-    const record = await this.syncLog.get(event.id);
-    return { httpStatus: 202, body: { syncId: event.id, ...(record && { status: record.status }) } };
+    return withLogContext({ eventId: event.id, flow, eventType: event.type }, async () => {
+      if ((await this.intake.accept({ event, source, flow })) === 'duplicate') {
+        this.logger.log(`Duplicate from ${source}, ignored`);
+        return { httpStatus: 200 as const, body: { syncId: event.id, duplicate: true as const } };
+      }
+      this.logger.log(`Accepted from ${source}`);
+      // With the inline dispatcher the event is already processed; report where it ended.
+      const record = await this.syncLog.get(event.id);
+      return { httpStatus: 202 as const, body: { syncId: event.id, ...(record && { status: record.status }) } };
+    });
   }
 
   private async reject(
@@ -79,6 +85,8 @@ export class IngestService {
       payload,
       error: { code, message, class: 'permanent' },
     });
+    // The reason only: the payload may contain customer data.
+    await withLogContext({ eventId: syncId, flow }, async () => this.logger.warn(`Rejected from ${source}: ${code}`));
     return { httpStatus: 400, body: { syncId, error: code, message } };
   }
 }

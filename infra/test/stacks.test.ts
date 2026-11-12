@@ -23,6 +23,7 @@ describe('LedgerBridgeStack', () => {
       webhookSecretName: 'ledgerbridge/webhooks',
       erpSecretName: 'ledgerbridge/erp',
       erpBaseUrl: 'https://erp.example',
+      alarmEmail: 'ops@example.com',
     }),
   );
 
@@ -174,6 +175,96 @@ describe('LedgerBridgeStack', () => {
     expect(policy).not.toContain('secretsmanager');
   });
 
+  describe('monitoring', () => {
+    const alarms = () => Object.values(template.findResources('AWS::CloudWatch::Alarm')).map((a) => a.Properties);
+    const alarm = (name: string) => alarms().find((a) => a.AlarmName === `LedgerBridge-${name}`)!;
+
+    it('has the five alarms, each emailing on ALARM and on OK', () => {
+      expect(alarms().map((a) => a.AlarmName).sort()).toEqual([
+        'LedgerBridge-CsvImportErrors',
+        'LedgerBridge-DeadLetters',
+        'LedgerBridge-QueueBacklog',
+        'LedgerBridge-SyncFailures',
+        'LedgerBridge-WorkerErrors',
+      ]);
+      for (const a of alarms()) {
+        expect(a.AlarmActions).toHaveLength(1);
+        expect(a.OKActions).toHaveLength(1);
+        expect(a.TreatMissingData).toBe('notBreaching');
+      }
+    });
+
+    it('alarms on messages arriving in the DLQ (it empties itself)', () => {
+      expect(alarm('DeadLetters')).toMatchObject({
+        MetricName: 'NumberOfMessagesReceived',
+        Statistic: 'Sum',
+        Period: 60,
+        Threshold: 1,
+        ComparisonOperator: 'GreaterThanOrEqualToThreshold',
+      });
+    });
+
+    it('alarms on 5+ failed events in 5 minutes, both flows added up', () => {
+      const a = alarm('SyncFailures');
+      expect(a).toMatchObject({ Threshold: 5, EvaluationPeriods: 1 });
+      const metrics = a.Metrics as Array<{ Expression?: string; MetricStat?: { Metric: { MetricName: string; Namespace: string; Dimensions: unknown[] }; Period: number } }>;
+      expect(metrics.find((m) => m.Expression)!.Expression).toBe('FILL(syncfailed_o2c, 0) + FILL(syncfailed_p2p, 0)');
+      const stats = metrics.filter((m) => m.MetricStat).map((m) => m.MetricStat!);
+      expect(stats).toHaveLength(2);
+      for (const st of stats) {
+        expect(st).toMatchObject({ Period: 300, Metric: { MetricName: 'SyncFailed', Namespace: 'LedgerBridge' } });
+        // Exactly the dimensions the app writes (see observability.spec.ts in integration-service).
+        expect(st.Metric.Dimensions).toEqual(expect.arrayContaining([{ Name: 'service', Value: 'ledgerbridge' }]));
+      }
+    });
+
+    it('alarms on worker errors 2 minutes in a row and on a 10-minute backlog', () => {
+      expect(alarm('WorkerErrors')).toMatchObject({ MetricName: 'Errors', EvaluationPeriods: 2, DatapointsToAlarm: 2, Threshold: 0 });
+      expect(alarm('QueueBacklog')).toMatchObject({ MetricName: 'ApproximateAgeOfOldestMessage', Statistic: 'Maximum', Threshold: 600 });
+    });
+
+    it('subscribes the alarm email to an HTTPS-only topic', () => {
+      template.hasResourceProperties('AWS::SNS::Subscription', { Protocol: 'email', Endpoint: 'ops@example.com' });
+      expect(JSON.stringify(template.findResources('AWS::SNS::TopicPolicy'))).toContain('aws:SecureTransport');
+    });
+
+    it('lets CloudWatch alarms publish to the topic, only for LedgerBridge alarms of this account', () => {
+      // Without this the topic policy only denies, and alarms fail with "not authorized to perform SNS:Publish".
+      const statements = Object.values(template.findResources('AWS::SNS::TopicPolicy')).flatMap(
+        (p) => p.Properties.PolicyDocument.Statement as Array<Record<string, unknown>>,
+      );
+      const allow = statements.find((s) => s.Sid === 'AllowLedgerBridgeAlarms')!;
+      expect(allow).toMatchObject({
+        Effect: 'Allow',
+        Action: 'sns:Publish',
+        Principal: { Service: 'cloudwatch.amazonaws.com' },
+        Condition: { StringEquals: { 'aws:SourceAccount': '123456789012' } },
+      });
+      expect(JSON.stringify(allow.Condition)).toContain(':alarm:LedgerBridge-*');
+    });
+
+    it('has a dashboard and a saved "trace one event" query over all four log groups', () => {
+      template.resourceCountIs('AWS::CloudWatch::Dashboard', 1);
+      template.hasResourceProperties('AWS::Logs::QueryDefinition', { Name: 'LedgerBridge/Trace one event' });
+      const q = Object.values(template.findResources('AWS::Logs::QueryDefinition'))[0]!.Properties;
+      expect(q.LogGroupNames).toHaveLength(4);
+      expect(q.QueryString).toContain('filter eventId =');
+    });
+
+    it('gives the LedgerBridge Lambdas the Powertools settings', () => {
+      const fns = Object.values(template.findResources('AWS::Lambda::Function')).filter((f) =>
+        /^(http|worker|csv|dlq).handler$/.test(f.Properties.Handler),
+      );
+      expect(fns).toHaveLength(4);
+      for (const f of fns) {
+        expect(f.Properties.Environment.Variables).toMatchObject({
+          POWERTOOLS_SERVICE_NAME: 'ledgerbridge',
+          POWERTOOLS_LOG_LEVEL: 'INFO',
+        });
+      }
+    });
+  });
+
   it('keeps logs for 7 days', () => {
     template.hasResourceProperties('AWS::Logs::LogGroup', { RetentionInDays: 7 });
   });
@@ -204,6 +295,18 @@ describe('MockErpStack', () => {
         { AttributeName: 'sk', KeyType: 'RANGE' },
       ],
       BillingMode: 'PAY_PER_REQUEST',
+    });
+  });
+
+  it('has chaos off unless asked for', () => {
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: { Variables: Match.objectLike({ CHAOS_ERROR_RATE: '0' }) },
+    });
+    const chaotic = Template.fromStack(
+      new MockErpStack(new cdk.App(), 'Chaos', { env, clientId: 'c', clientSecret: 's', jwtSecret: 'j', chaosErrorRate: 1 }),
+    );
+    chaotic.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: { Variables: Match.objectLike({ CHAOS_ERROR_RATE: '1' }) },
     });
   });
 
