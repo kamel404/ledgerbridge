@@ -11,7 +11,10 @@ import { INTEGRATION_CONFIG, loadConfig } from '../src/config/integration.config
 import { DeadLetterHandler } from '../src/dlq/dead-letter.handler.js';
 import { EVENT_DISPATCHER } from '../src/ingest/event-dispatcher.js';
 import { computeSignature } from '../src/ingest/signature.js';
+import { ErpClient } from '../src/erp-client/erp-client.js';
 import { NoopSyncMetrics } from '../src/observability/sync-metrics.js';
+import { Reconciler } from '../src/reconciliation/reconciler.js';
+import { RECONCILIATION_STORE } from '../src/reconciliation/reconciliation-store.js';
 import { EnvSecretsProvider } from '../src/secrets/env-secrets.provider.js';
 import { SECRETS_PROVIDER } from '../src/secrets/secrets-provider.js';
 import { SyncLogService } from '../src/sync-log/sync-log.service.js';
@@ -208,6 +211,37 @@ describe('Admin API (e2e)', () => {
 
     it('404 for an unknown event', async () => {
       await admin('get', '/admin/syncs/evt_nope').expect(404);
+    });
+  });
+
+  // Phase 8 "done when": an invoice deleted in the ERP is flagged by the next run.
+  describe('reconciliation', () => {
+    // Everything above happened seconds ago; a run "10 minutes from now" sees it
+    // past the 5-minute settling time.
+    const runAt = () => new Date(Date.now() + 10 * 60_000);
+    const reconciler = () =>
+      new Reconciler(app.get(SyncLogService), app.get(ErpClient), app.get(RECONCILIATION_STORE), new NoopSyncMetrics());
+
+    it('finds nothing when the ERP holds every synced record', async () => {
+      const report = await reconciler().run(runAt());
+      expect(report.mismatches).toEqual([]);
+      // 3 replayed + 3 paged invoices; customers are not compared.
+      expect(report.byType.invoice).toEqual({ synced: 6, createdInErp: 6, matched: 6 });
+    });
+
+    it('flags an invoice deleted directly in the ERP, and the dashboard stats show it', async () => {
+      await request(erp.getHttpServer())
+        .delete('/services/rest/record/v1/invoice/eid:INV-PAGE-1')
+        .set('Authorization', `Bearer ${erpToken}`)
+        .expect(204);
+
+      const report = await reconciler().run(runAt());
+      expect(report.mismatches).toEqual([
+        expect.objectContaining({ kind: 'MISSING_IN_ERP', recordType: 'invoice', externalId: 'INV-PAGE-1', eventId: 'evt_page_1' }),
+      ]);
+
+      const stats = await admin('get', '/admin/stats').expect(200);
+      expect(stats.body.reconciliation).toMatchObject({ mismatchCount: 1, mismatches: [{ externalId: 'INV-PAGE-1' }] });
     });
   });
 });

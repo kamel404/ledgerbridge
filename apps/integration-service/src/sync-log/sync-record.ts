@@ -59,6 +59,11 @@ export interface SyncLogRepository {
   list(query: ListQuery): Promise<ListPage>;
   /** How many records per status and flow were last updated at or after `sinceIso`. */
   countSince(sinceIso: string): Promise<StatusCounts>;
+  /** Every record with this status last updated at or after `sinceIso` (for reconciliation). */
+  listSince(status: SyncStatus, sinceIso: string): Promise<SyncRef[]>;
 }
+
+/** The fields reconciliation needs: which ERP record an event produced. */
+export type SyncRef = Pick<SyncRecord, 'eventId' | 'flow' | 'businessKey' | 'erpRecordType' | 'erpRecordId' | 'updatedAt'>;
 
 export const SYNC_LOG_REPOSITORY = Symbol('SYNC_LOG_REPOSITORY');

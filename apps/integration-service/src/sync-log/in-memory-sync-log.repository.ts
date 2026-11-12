@@ -9,7 +9,7 @@ import {
   type ListQuery,
   type StatusCounts,
 } from './sync-list.js';
-import type { SyncLogRepository, SyncRecord } from './sync-record.js';
+import type { SyncLogRepository, SyncRecord, SyncRef } from './sync-record.js';
 
 /** Local-only sync log (local dev, tests). Lost on restart. */
 export class InMemorySyncLogRepository implements SyncLogRepository {
@@ -50,6 +50,14 @@ export class InMemorySyncLogRepository implements SyncLogRepository {
     const counts = emptyCounts();
     for (const r of this.records.values()) if (r.updatedAt >= sinceIso) counts[r.status][r.flow]++;
     return counts;
+  }
+
+  async listSince(status: SyncStatus, sinceIso: string): Promise<SyncRef[]> {
+    return [...this.records.values()]
+      .filter((r) => r.status === status && r.updatedAt >= sinceIso)
+      .map(({ eventId, flow, businessKey, erpRecordType, erpRecordId, updatedAt }) =>
+        stripUndefined({ eventId, flow, businessKey, erpRecordType, erpRecordId, updatedAt }),
+      );
   }
 
   /** For tests and debugging. */

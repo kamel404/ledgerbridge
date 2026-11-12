@@ -3,7 +3,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import type { Flow, Source, SyncStatus } from '@ledgerbridge/shared';
 import type { ErrorSummary } from '../errors/integration-errors.js';
 import type { ListPage, ListQuery, StatusCounts } from './sync-list.js';
-import { SYNC_LOG_REPOSITORY, type SyncLogRepository, type SyncRecord } from './sync-record.js';
+import { SYNC_LOG_REPOSITORY, type SyncLogRepository, type SyncRecord, type SyncRef } from './sync-record.js';
 
 export type RecordChanges = Partial<
   Pick<SyncRecord, 'attempts' | 'erpRecordType' | 'erpRecordId' | 'lastError' | 'completedAt'>
@@ -107,6 +107,11 @@ export class SyncLogService {
 
   countSince(sinceIso: string): Promise<StatusCounts> {
     return this.repo.countSince(sinceIso);
+  }
+
+  /** SUCCEEDED records last updated at or after `sinceIso`. */
+  succeededSince(sinceIso: string): Promise<SyncRef[]> {
+    return this.repo.listSince('SUCCEEDED', sinceIso);
   }
 
   private applyTransition(record: SyncRecord, status: SyncStatus, changes: RecordChanges, note?: string): SyncRecord {

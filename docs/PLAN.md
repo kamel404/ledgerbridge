@@ -600,9 +600,9 @@ Automated, no AWS: `npm run test:e2e -w integration-service` (`test/admin.e2e-sp
 
 ### Tasks
 
-- [ ] `lambda/reconcile.ts`: last 24 h `SUCCEEDED` records vs SuiteQL for invoices, payments, bills in the same window; list missing on either side
-- [ ] Publish `ReconciliationMismatches` metric + alarm; store a summary item for the dashboard Overview
-- [ ] EventBridge rule at 02:00 UTC (plus a way to run it by hand for testing)
+- [x] `lambda/reconcile.ts`: last 24 h `SUCCEEDED` records vs SuiteQL for invoices, payments, bills in the same window; list missing on either side
+- [x] Publish `ReconciliationMismatches` metric + alarm; store a summary item for the dashboard Overview
+- [x] EventBridge Scheduler at 02:00 UTC (plus `npm run reconcile` to run it by hand, and `npm run simulate -- reconcile --aws`)
 - [ ] Simulator `load --count 200`
 - [ ] Contract test: the ERP client's requests match the mock's routes
 - [ ] Coverage ≥ 80% on `flows/` and `erp-client/`

@@ -17,6 +17,8 @@
 //   npm run simulate -- csv --aws         uploads a vendor-bill CSV with some bad rows to the
 //                                         import bucket; checks the bills, the errors file,
 //                                         then uploads it again (nothing new may appear)
+//   npm run simulate -- reconcile --aws   syncs an invoice, deletes it in the ERP, runs
+//                                         reconciliation (flagged), re-sends it, runs again (clean)
 //
 // Options:
 //   --aws          send to the deployed AWS API instead of localhost. The URLs
@@ -42,6 +44,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { aws, loginHint } from './aws-cli.ts';
+import { printReport, runReconcile } from './reconcile.ts';
 
 const args = process.argv.slice(2);
 const ON_AWS = args.includes('--aws');
@@ -770,6 +773,58 @@ async function csv(): Promise<boolean> {
   return check(afterCounts.every((c) => c === 1), 'still one record per bill in the ERP', afterCounts.join(', ')) && ok;
 }
 
+/**
+ * PLAN Phase 8 "done when": an invoice deleted directly in the ERP is flagged
+ * by the next reconciliation. Then the fix: send the invoice again (new event
+ * ID; the upsert re-creates it) and the next run is clean again.
+ *
+ * Runs reconciliation with includeRecent, so the invoice synced a moment ago
+ * is inside the checked window. A mismatch makes the ReconciliationMismatches
+ * alarm email you; the clean run at the end sends the OK email.
+ */
+async function reconcile(): Promise<boolean> {
+  if (!ON_AWS) {
+    console.error('Runs the deployed reconcile Lambda, so use --aws.');
+    return false;
+  }
+  const inv = makeInvoice(0);
+  console.log(`1. Syncing invoice ${inv.invoiceId}`);
+  const first = (await sendAndSettle([{ source: 'billing', event: inv.event }])).get(String(inv.event.id));
+  let ok = check(first?.status === 'SUCCEEDED', 'synced', describeState(first));
+  if (!ok) return false;
+
+  console.log(`2. Deleting ${inv.invoiceId} directly in the ERP (as someone might by hand)`);
+  const token = await erpToken();
+  const del = await erpFetch(`${ERP_URL}/services/rest/record/v1/invoice/eid:${encodeURIComponent(inv.invoiceId)}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  ok = check(del.status === 204, 'deleted in the ERP', String(del.status)) && ok;
+
+  console.log('3. Running reconciliation');
+  const flagged = runReconcile(true);
+  printReport(flagged);
+  const mine = (r: typeof flagged) => r.mismatches.filter((m) => m.externalId === inv.invoiceId);
+  ok = check(
+    mine(flagged).some((m) => m.kind === 'MISSING_IN_ERP' && m.eventId === String(inv.event.id)),
+    `${inv.invoiceId} flagged as MISSING_IN_ERP`,
+  ) && ok;
+
+  console.log(`4. Fixing it: sending ${inv.invoiceId} again with a new event ID`);
+  const resend = { ...inv.event, id: eventId() };
+  const second = (await sendAndSettle([{ source: 'billing', event: resend }])).get(String(resend.id));
+  ok = check(second?.status === 'SUCCEEDED', 're-synced', describeState(second)) && ok;
+
+  console.log('5. Running reconciliation again');
+  const clean = runReconcile(true);
+  printReport(clean);
+  ok = check(mine(clean).length === 0, `${inv.invoiceId} no longer flagged`) && ok;
+  if (clean.mismatchCount > 0) {
+    console.log('  (Other mismatches are from earlier test runs or records entered by hand; see above.)');
+  }
+  return ok;
+}
+
 const COMMANDS: Record<string, () => Promise<boolean>> = {
   happy,
   one,
@@ -781,6 +836,7 @@ const COMMANDS: Record<string, () => Promise<boolean>> = {
   dead,
   outage,
   csv,
+  reconcile,
 };
 
 const command = args.find((a, i) => !a.startsWith('--') && args[i - 1] !== '--delay');

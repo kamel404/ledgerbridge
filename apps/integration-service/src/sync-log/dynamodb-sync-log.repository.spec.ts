@@ -93,6 +93,23 @@ describe('DynamoDbSyncLogRepository', () => {
     expect(inputs[0]!.KeyConditionExpression).toBe('#s = :s AND updatedAt >= :since');
   });
 
+  it('listSince reads every page of one status from the index, only the fields reconciliation needs', async () => {
+    const { db, inputs } = fakeDb((input) =>
+      input.ExclusiveStartKey
+        ? { Items: [item('b', 'SUCCEEDED', '2026-11-12T02:00:00Z')] }
+        : { Items: [item('a', 'SUCCEEDED', '2026-11-12T01:00:00Z')], LastEvaluatedKey: { eventId: 'a' } },
+    );
+    const refs = await new DynamoDbSyncLogRepository(undefined, 'SyncLog', db).listSince('SUCCEEDED', '2026-11-12T00:00:00Z');
+    expect(refs.map((r) => r.eventId)).toEqual(['a', 'b']);
+    expect(inputs).toHaveLength(2);
+    expect(inputs[0]).toMatchObject({
+      IndexName: 'byStatus',
+      KeyConditionExpression: '#s = :s AND updatedAt >= :since',
+      ExpressionAttributeValues: { ':s': 'SUCCEEDED', ':since': '2026-11-12T00:00:00Z' },
+    });
+    expect(inputs[0]!.ProjectionExpression).not.toContain('payload');
+  });
+
   it('replaceIf is a conditional write on the status', async () => {
     const { db, inputs } = fakeDb(() => ({}));
     await new DynamoDbSyncLogRepository(undefined, 'SyncLog', db).replaceIf({ eventId: 'a' } as never, 'DEAD');

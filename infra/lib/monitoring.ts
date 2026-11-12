@@ -19,6 +19,7 @@ export interface MonitoringProps {
   readonly dlq: sqs.IQueue;
   readonly worker: lambda.IFunction;
   readonly csvImport: lambda.IFunction;
+  readonly reconcile: lambda.IFunction;
   /** Every LedgerBridge Lambda, for the error graph and the log queries. */
   readonly functions: Record<string, lambda.Function>;
   /** Where alarm emails go. Without it the topic exists but nobody is subscribed. */
@@ -130,6 +131,34 @@ export class Monitoring extends Construct {
       evaluationPeriods: 1,
     });
 
+    // Reconciliation runs once a day and reports how many records disagree.
+    // IGNORE missing data: between runs there is no data point, and the alarm
+    // should stay as the last run left it (not flip to OK an hour later).
+    // It goes back to OK when a run finds 0 mismatches.
+    const mismatches = new cloudwatch.Metric({
+      namespace: METRICS_NAMESPACE,
+      metricName: 'ReconciliationMismatches',
+      dimensionsMap: { service: SERVICE_NAME },
+      statistic: 'Maximum',
+      period: cdk.Duration.minutes(5),
+    });
+    this.alarm('ReconciliationMismatches', {
+      alarmDescription: 'The last reconciliation found records that differ between the sync log and the ERP. See the Overview page.',
+      metric: mismatches,
+      threshold: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      evaluationPeriods: 1,
+      treatMissingData: cloudwatch.TreatMissingData.IGNORE,
+    });
+    // Without this, a run that crashes (ERP down at 02:00) would leave no trace but a log line.
+    this.alarm('ReconcileErrors', {
+      alarmDescription: 'The reconciliation run failed (after Scheduler retried it). No result was stored.',
+      metric: props.reconcile.metricErrors({ period: cdk.Duration.minutes(5), statistic: 'Sum' }),
+      threshold: 0,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      evaluationPeriods: 1,
+    });
+
     // ---- Saved Logs Insights query -----------------------------------------------
     const logGroups = Object.values(props.functions).map((fn) => fn.logGroup);
     new logs.QueryDefinition(this, 'TraceOneEvent', {
@@ -200,6 +229,15 @@ export class Monitoring extends Construct {
         title: 'Lambda duration p95 (ms)',
         width: 12,
         left: Object.entries(props.functions).map(([name, fn]) => fn.metricDuration({ label: name, statistic: 'p95' })),
+      }),
+    );
+    dashboard.addWidgets(
+      new cloudwatch.GraphWidget({
+        title: 'Reconciliation mismatches (one point per run)',
+        width: 24,
+        height: 5,
+        period: cdk.Duration.days(1),
+        left: [mismatches.with({ label: 'Mismatches', period: cdk.Duration.days(1) })],
       }),
     );
     dashboard.addWidgets(

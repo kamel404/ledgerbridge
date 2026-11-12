@@ -1,6 +1,6 @@
 import Link from 'next/link';
 import { adminApi } from '@/lib/admin-api';
-import { formatTime } from '@/lib/format';
+import { formatTime, MISMATCH_INFO, syncHref, timeAgo } from '@/lib/format';
 import { FLOWS, type SyncStatus } from '@/lib/types';
 import { AutoRefresh } from './auto-refresh';
 
@@ -17,6 +17,7 @@ const TILES: Array<{ status: SyncStatus; label: string; tone: string; hint: stri
 export default async function OverviewPage() {
   const stats = await adminApi.stats();
   const inProgress = stats.byStatus.RECEIVED + stats.byStatus.PROCESSING;
+  const recon = stats.reconciliation;
 
   return (
     <>
@@ -67,11 +68,21 @@ export default async function OverviewPage() {
             <div className="hint">no queues (running locally)</div>
           </div>
         )}
-        <div className="tile">
-          <div className="label">Last reconciliation</div>
-          <div className="value">–</div>
-          <div className="hint">arrives in Phase 8</div>
-        </div>
+        {recon ? (
+          <a href="#reconciliation" className={`tile ${recon.mismatchCount ? 'bad' : 'ok'}`}>
+            <div className="label">Last reconciliation</div>
+            <div className="value">{recon.mismatchCount}</div>
+            <div className="hint">
+              {recon.mismatchCount === 1 ? 'mismatch' : 'mismatches'} · ran {timeAgo(recon.runAt)}
+            </div>
+          </a>
+        ) : (
+          <div className="tile">
+            <div className="label">Last reconciliation</div>
+            <div className="value">–</div>
+            <div className="hint">not run yet (daily at 02:00 UTC)</div>
+          </div>
+        )}
       </div>
 
       <h2>By flow</h2>
@@ -107,6 +118,56 @@ export default async function OverviewPage() {
           </tbody>
         </table>
       </div>
+
+      {recon && (
+        <>
+          <h2 id="reconciliation">Reconciliation</h2>
+          <p className="sub">
+            Checks that the ERP holds what LedgerBridge synced, and nothing it didn't, for{' '}
+            {formatTime(recon.since)} to {formatTime(recon.until)}. Ran {formatTime(recon.runAt)}.
+          </p>
+          {recon.mismatchCount === 0 ? (
+            <p className="notice ok">
+              Both sides agree: {recon.byType.invoice.matched} invoices, {recon.byType.customerPayment.matched} payments and{' '}
+              {recon.byType.vendorBill.matched} vendor bills checked.
+            </p>
+          ) : (
+            <>
+              {recon.mismatchCount > recon.mismatches.length && (
+                <p className="notice bad">
+                  Showing the first {recon.mismatches.length} of {recon.mismatchCount}. The full list is in the reconcile Lambda's logs.
+                </p>
+              )}
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Problem</th>
+                      <th>Record</th>
+                      <th>ERP ID</th>
+                      <th>Event</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {recon.mismatches.map((m) => (
+                      <tr key={`${m.kind}:${m.recordType}:${m.externalId}:${m.erpRecordId ?? ''}`}>
+                        <td title={MISMATCH_INFO[m.kind].meaning}>
+                          <span className="badge bad">{MISMATCH_INFO[m.kind].label}</span>
+                        </td>
+                        <td>
+                          {m.recordType} <strong>{m.externalId}</strong>
+                        </td>
+                        <td>{m.erpRecordId ?? '–'}</td>
+                        <td>{m.eventId ? <Link href={syncHref(m.eventId)}>{m.eventId}</Link> : '–'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+        </>
+      )}
     </>
   );
 }

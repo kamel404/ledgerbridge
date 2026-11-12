@@ -11,6 +11,8 @@ export const METRIC = {
   retried: 'SyncRetried',
   dead: 'SyncDead',
   durationMs: 'SyncDurationMs',
+  /** Per reconciliation run: records missing on one side (0 when both sides agree). No flow dimension. */
+  reconciliationMismatches: 'ReconciliationMismatches',
 } as const;
 
 /**
@@ -22,6 +24,8 @@ export interface SyncMetrics {
   attempt(flow: Flow, outcome: 'SUCCEEDED' | 'FAILED' | 'RETRYING', durationMs: number): void;
   /** An event was marked DEAD by the DLQ handler. */
   dead(flow: Flow): void;
+  /** A reconciliation run ended with this many mismatches (also sent when 0). */
+  reconciled(mismatches: number): void;
 }
 
 export const SYNC_METRICS = Symbol('SYNC_METRICS');
@@ -29,6 +33,7 @@ export const SYNC_METRICS = Symbol('SYNC_METRICS');
 export class NoopSyncMetrics implements SyncMetrics {
   attempt(): void {}
   dead(): void {}
+  reconciled(): void {}
 }
 
 /**
@@ -51,6 +56,11 @@ export class PowertoolsSyncMetrics implements SyncMetrics {
 
   dead(flow: Flow): void {
     this.emit(flow, METRIC.dead, MetricUnit.Count, 1);
+  }
+
+  reconciled(mismatches: number): void {
+    // Only the `service` dimension: reconciliation covers both flows at once.
+    this.metrics.singleMetric().addMetric(METRIC.reconciliationMismatches, MetricUnit.Count, mismatches);
   }
 
   private emit(flow: Flow, name: string, unit: (typeof MetricUnit)[keyof typeof MetricUnit], value: number) {

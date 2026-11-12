@@ -5,6 +5,8 @@ import { withLogContext } from '../observability/log-context.js';
 import { SyncLogService } from '../sync-log/sync-log.service.js';
 import type { ListPage, ListQuery } from '../sync-log/sync-list.js';
 import type { SyncRecord } from '../sync-log/sync-record.js';
+import type { ReconciliationReport } from '../reconciliation/reconciliation-report.js';
+import { RECONCILIATION_STORE, type ReconciliationStore } from '../reconciliation/reconciliation-store.js';
 import { QUEUE_STATS, type QueueStats, type QueueStatsReader } from './queue-stats.js';
 
 /** Only these can be replayed (SPEC §8.6). REJECTED has no valid event to send. */
@@ -19,8 +21,8 @@ export interface Stats {
   byFlow: Record<Flow, Record<SyncStatus, number>>;
   /** Missing when there are no queues (local run). */
   queues?: QueueStats;
-  /** Last reconciliation run: arrives in Phase 8. */
-  reconciliation: null;
+  /** The last reconciliation run, or null if none has run yet. */
+  reconciliation: ReconciliationReport | null;
 }
 
 export type ReplayResult =
@@ -36,6 +38,7 @@ export class AdminService {
     private readonly syncLog: SyncLogService,
     @Inject(EVENT_DISPATCHER) private readonly dispatcher: EventDispatcher,
     @Inject(QUEUE_STATS) private readonly queues: QueueStatsReader,
+    @Inject(RECONCILIATION_STORE) private readonly reconciliation: ReconciliationStore,
   ) {}
 
   list(query: ListQuery): Promise<ListPage> {
@@ -48,14 +51,18 @@ export class AdminService {
 
   async stats(now = new Date()): Promise<Stats> {
     const since = new Date(now.getTime() - 24 * 3600_000).toISOString();
-    const [counts, queues] = await Promise.all([this.syncLog.countSince(since), this.queues.read()]);
+    const [counts, queues, reconciliation] = await Promise.all([
+      this.syncLog.countSince(since),
+      this.queues.read(),
+      this.reconciliation.latest(),
+    ]);
     const byStatus = Object.fromEntries(
       SyncStatus.options.map((s) => [s, Flow.options.reduce((n, f) => n + counts[s][f], 0)]),
     ) as Record<SyncStatus, number>;
     const byFlow = Object.fromEntries(
       Flow.options.map((f) => [f, Object.fromEntries(SyncStatus.options.map((s) => [s, counts[s][f]]))]),
     ) as Record<Flow, Record<SyncStatus, number>>;
-    return { since, until: now.toISOString(), byStatus, byFlow, ...(queues && { queues }), reconciliation: null };
+    return { since, until: now.toISOString(), byStatus, byFlow, ...(queues && { queues }), reconciliation: reconciliation ?? null };
   }
 
   /**

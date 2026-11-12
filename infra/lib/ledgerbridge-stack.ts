@@ -6,6 +6,8 @@ import iam from 'aws-cdk-lib/aws-iam';
 import { SqsEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
 import s3 from 'aws-cdk-lib/aws-s3';
 import s3n from 'aws-cdk-lib/aws-s3-notifications';
+import scheduler from 'aws-cdk-lib/aws-scheduler';
+import schedulerTargets from 'aws-cdk-lib/aws-scheduler-targets';
 import secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import sqs from 'aws-cdk-lib/aws-sqs';
 import type { Construct } from 'constructs';
@@ -35,6 +37,7 @@ export const WORKER_TIMEOUT = cdk.Duration.seconds(30);
  *   S3 incoming/*.csv --> CSV Lambda --> SyncLog table (RECEIVED, dedup)
  *                                    \-> SQS SyncQueue --> worker Lambda --> ERP
  *                                          \-> after 4 failed receives: SyncDLQ --> DLQ Lambda (DEAD)
+ *   02:00 UTC daily: Scheduler --> reconcile Lambda --> compares SyncLog with the ERP --> Reconciliation table
  */
 export class LedgerBridgeStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: LedgerBridgeStackProps) {
@@ -227,6 +230,44 @@ export class LedgerBridgeStack extends cdk.Stack {
     dlq.grant(admin, 'sqs:GetQueueAttributes');
     adminSecret.grantRead(admin);
 
+    // ---- Reconciliation (PLAN Phase 8) --------------------------------------------
+    // Results: "latest" for the dashboard, plus one item per run (90 days, TTL).
+    const reconciliationTable = new dynamodb.TableV2(this, 'Reconciliation', {
+      partitionKey: { name: 'runId', type: dynamodb.AttributeType.STRING },
+      billing: dynamodb.Billing.onDemand(),
+      timeToLiveAttribute: 'ttl',
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+    const reconcile = new NestFunction(this, 'Reconcile', {
+      app: 'integration-service',
+      entry: 'reconcile',
+      description: 'LedgerBridge reconciliation: SUCCEEDED sync records vs the ERP, last 24 h',
+      // One SuiteQL query per type plus a sync log read: seconds. 5 minutes leaves room for a busy day.
+      timeout: cdk.Duration.minutes(5),
+      environment: {
+        SYNC_LOG_TABLE: syncLog.tableName,
+        ERP_BASE_URL: props.erpBaseUrl,
+        ERP_SECRET_NAME: props.erpSecretName,
+        RECONCILIATION_TABLE: reconciliationTable.tableName,
+      },
+    });
+    // Read-only on the sync log (it never changes a sync record), write-only on results.
+    syncLog.grantReadData(reconcile);
+    erpSecret.grantRead(reconcile);
+    reconciliationTable.grantWriteData(reconcile);
+    // The admin API shows the latest run on the Overview.
+    reconciliationTable.grantReadData(admin);
+    admin.addEnvironment('RECONCILIATION_TABLE', reconciliationTable.tableName);
+
+    // EventBridge Scheduler calls it at 02:00 UTC every day. CDK creates a role
+    // that Scheduler uses, allowed to invoke only this function. If the call
+    // fails (e.g. throttled), Scheduler tries twice more.
+    new scheduler.Schedule(this, 'NightlyReconcile', {
+      description: 'LedgerBridge: reconcile the last 24 hours at 02:00 UTC',
+      schedule: scheduler.ScheduleExpression.cron({ minute: '0', hour: '2', timeZone: cdk.TimeZone.ETC_UTC }),
+      target: new schedulerTargets.LambdaInvoke(reconcile, { retryAttempts: 2 }),
+    });
+
     // ---- Public HTTP API -------------------------------------------------------
     const api = new apigw.HttpApi(this, 'HttpApi', {
       description: 'LedgerBridge webhooks',
@@ -257,7 +298,8 @@ export class LedgerBridgeStack extends cdk.Stack {
       dlq,
       worker,
       csvImport,
-      functions: { ingest, worker, csvImport, dlqHandler, admin },
+      reconcile,
+      functions: { ingest, worker, csvImport, dlqHandler, admin, reconcile },
       alarmEmail: props.alarmEmail,
     });
 
@@ -266,6 +308,10 @@ export class LedgerBridgeStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'SyncDlqUrl', { value: dlq.queueUrl });
     new cdk.CfnOutput(this, 'SyncLogTableName', { value: syncLog.tableName });
     new cdk.CfnOutput(this, 'WorkerFunctionName', { value: worker.functionName });
+    new cdk.CfnOutput(this, 'ReconcileFunctionName', {
+      value: reconcile.functionName,
+      description: 'Run reconciliation by hand: npm run reconcile',
+    });
     new cdk.CfnOutput(this, 'CsvBucketName', {
       value: csvBucket.bucketName,
       description: 'Upload vendor-bill CSVs to s3://<CsvBucketName>/incoming/',

@@ -193,23 +193,90 @@ describe('LedgerBridgeStack', () => {
     expect(policy).not.toContain('secretsmanager');
   });
 
+  describe('reconciliation', () => {
+    it('runs the reconcile Lambda at 02:00 UTC every day, retrying a failed call twice', () => {
+      template.hasResourceProperties('AWS::Scheduler::Schedule', {
+        ScheduleExpression: 'cron(0 2 * * ? *)',
+        ScheduleExpressionTimezone: 'Etc/UTC',
+        State: 'ENABLED',
+        Target: Match.objectLike({
+          Arn: { 'Fn::GetAtt': [Match.stringLikeRegexp('^Reconcile'), 'Arn'] },
+          RetryPolicy: Match.objectLike({ MaximumRetryAttempts: 2 }),
+        }),
+      });
+    });
+
+    it('stores results in their own table with a TTL', () => {
+      template.hasResourceProperties('AWS::DynamoDB::GlobalTable', {
+        KeySchema: [{ AttributeName: 'runId', KeyType: 'HASH' }],
+        TimeToLiveSpecification: { AttributeName: 'ttl', Enabled: true },
+      });
+    });
+
+    it('reads the sync log and the ERP secret, writes results, and cannot change sync records or queues', () => {
+      template.hasResourceProperties('AWS::Lambda::Function', {
+        Handler: 'reconcile.handler',
+        Timeout: 300,
+        Environment: {
+          Variables: Match.objectLike({
+            ERP_SECRET_NAME: 'ledgerbridge/erp',
+            SYNC_LOG_TABLE: Match.anyValue(),
+            RECONCILIATION_TABLE: Match.anyValue(),
+          }),
+        },
+      });
+      const policy = JSON.parse(policyOf('Reconcile')) as Array<{ Statement: Array<{ Action: string | string[]; Resource: unknown }> }>;
+      const statements = policy.flatMap((p) => p.Statement);
+      const actionsOn = (table: string) =>
+        statements.filter((s) => JSON.stringify(s.Resource).includes(table)).flatMap((s) => [s.Action].flat());
+      expect(actionsOn('SyncLog')).toContain('dynamodb:Query');
+      expect(actionsOn('SyncLog').filter((a) => /Put|Update|Delete|Write/.test(a))).toEqual([]);
+      expect(actionsOn('Reconciliation')).toContain('dynamodb:PutItem');
+      const text = JSON.stringify(policy);
+      expect(text).toContain('secret:ledgerbridge/erp');
+      expect(text).not.toContain('secret:ledgerbridge/webhooks');
+      expect(text).not.toContain('sqs:');
+    });
+
+    it('lets the admin API read the latest result', () => {
+      template.hasResourceProperties('AWS::Lambda::Function', {
+        Handler: 'http.handler',
+        Environment: { Variables: Match.objectLike({ ADMIN_SECRET_NAME: 'ledgerbridge/admin', RECONCILIATION_TABLE: Match.anyValue() }) },
+      });
+    });
+  });
+
   describe('monitoring', () => {
     const alarms = () => Object.values(template.findResources('AWS::CloudWatch::Alarm')).map((a) => a.Properties);
     const alarm = (name: string) => alarms().find((a) => a.AlarmName === `LedgerBridge-${name}`)!;
 
-    it('has the five alarms, each emailing on ALARM and on OK', () => {
+    it('has the seven alarms, each emailing on ALARM and on OK', () => {
       expect(alarms().map((a) => a.AlarmName).sort()).toEqual([
         'LedgerBridge-CsvImportErrors',
         'LedgerBridge-DeadLetters',
         'LedgerBridge-QueueBacklog',
+        'LedgerBridge-ReconcileErrors',
+        'LedgerBridge-ReconciliationMismatches',
         'LedgerBridge-SyncFailures',
         'LedgerBridge-WorkerErrors',
       ]);
       for (const a of alarms()) {
         expect(a.AlarmActions).toHaveLength(1);
         expect(a.OKActions).toHaveLength(1);
-        expect(a.TreatMissingData).toBe('notBreaching');
+        // Reconciliation reports once a day: between runs the alarm keeps its state.
+        expect(a.TreatMissingData).toBe(a.AlarmName === 'LedgerBridge-ReconciliationMismatches' ? 'ignore' : 'notBreaching');
       }
+    });
+
+    it('alarms when a reconciliation run reports any mismatch', () => {
+      expect(alarm('ReconciliationMismatches')).toMatchObject({
+        Namespace: 'LedgerBridge',
+        MetricName: 'ReconciliationMismatches',
+        Dimensions: [{ Name: 'service', Value: 'ledgerbridge' }],
+        Statistic: 'Maximum',
+        Threshold: 1,
+        ComparisonOperator: 'GreaterThanOrEqualToThreshold',
+      });
     });
 
     it('alarms on messages arriving in the DLQ (it empties itself)', () => {
@@ -261,19 +328,19 @@ describe('LedgerBridgeStack', () => {
       expect(JSON.stringify(allow.Condition)).toContain(':alarm:LedgerBridge-*');
     });
 
-    it('has a dashboard and a saved "trace one event" query over all five log groups', () => {
+    it('has a dashboard and a saved "trace one event" query over all six log groups', () => {
       template.resourceCountIs('AWS::CloudWatch::Dashboard', 1);
       template.hasResourceProperties('AWS::Logs::QueryDefinition', { Name: 'LedgerBridge/Trace one event' });
       const q = Object.values(template.findResources('AWS::Logs::QueryDefinition'))[0]!.Properties;
-      expect(q.LogGroupNames).toHaveLength(5);
+      expect(q.LogGroupNames).toHaveLength(6);
       expect(q.QueryString).toContain('filter eventId =');
     });
 
     it('gives the LedgerBridge Lambdas the Powertools settings', () => {
       const fns = Object.values(template.findResources('AWS::Lambda::Function')).filter((f) =>
-        /^(http|worker|csv|dlq).handler$/.test(f.Properties.Handler),
+        /^(http|worker|csv|dlq|reconcile).handler$/.test(f.Properties.Handler),
       );
-      expect(fns).toHaveLength(5); // ingest, worker, csv, dlq, admin
+      expect(fns).toHaveLength(6); // ingest, worker, csv, dlq, admin, reconcile
       for (const f of fns) {
         expect(f.Properties.Environment.Variables).toMatchObject({
           POWERTOOLS_SERVICE_NAME: 'ledgerbridge',

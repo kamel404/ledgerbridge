@@ -26,6 +26,7 @@
     "deploy": "npm run build:lambda && npm run cdk -w infra -- deploy --all --outputs-file cdk-outputs.json --profile ledgerbridge",
     "destroy": "npm run cdk -w infra -- destroy --all --profile ledgerbridge",
     "chaos": "node --no-warnings scripts/chaos.ts",
+    "reconcile": "node --no-warnings scripts/reconcile.ts",
     "dashboard": "npm run dev -w dashboard",
     "dashboard:env": "node --no-warnings scripts/dashboard-env.ts"
   }

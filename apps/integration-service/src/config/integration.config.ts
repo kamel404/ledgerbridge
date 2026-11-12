@@ -28,6 +28,8 @@ const EnvSchema = z.object({
   ADMIN_SECRET_NAME: z.string().min(1).optional(),
   /** Dead-letter queue URL, for the DLQ depth on the dashboard. Unset = no queue stats. */
   SYNC_DLQ_URL: z.url().optional(),
+  /** DynamoDB table with reconciliation results. Unset = kept in memory. */
+  RECONCILIATION_TABLE: z.string().min(1).optional(),
 });
 
 export interface IntegrationConfig {
@@ -40,6 +42,7 @@ export interface IntegrationConfig {
   erpSecretName?: string;
   adminSecretName?: string;
   syncDlqUrl?: string;
+  reconciliationTable?: string;
 }
 
 export const INTEGRATION_CONFIG = Symbol('INTEGRATION_CONFIG');
@@ -62,5 +65,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): IntegrationCon
     ...(e.ERP_SECRET_NAME && { erpSecretName: e.ERP_SECRET_NAME }),
     ...(e.ADMIN_SECRET_NAME && { adminSecretName: e.ADMIN_SECRET_NAME }),
     ...(e.SYNC_DLQ_URL && { syncDlqUrl: e.SYNC_DLQ_URL }),
+    ...(e.RECONCILIATION_TABLE && { reconciliationTable: e.RECONCILIATION_TABLE }),
   };
 }

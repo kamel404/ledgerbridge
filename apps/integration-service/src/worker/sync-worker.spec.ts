@@ -10,7 +10,7 @@ function setup(processEvent: (event: LedgerEvent) => Promise<unknown>) {
   const repo = new InMemorySyncLogRepository();
   const syncLog = new SyncLogService(repo);
   const flows = { processEvent: vi.fn(processEvent) } as unknown as FlowRegistry;
-  const metrics = { attempt: vi.fn(), dead: vi.fn() };
+  const metrics = { attempt: vi.fn(), dead: vi.fn(), reconciled: vi.fn() };
   const worker = new SyncWorker(flows, syncLog, metrics);
   const event = invoiceEvent();
   const receive = () =>

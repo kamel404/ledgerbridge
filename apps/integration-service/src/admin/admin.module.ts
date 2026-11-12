@@ -2,6 +2,7 @@ import { SQSClient } from '@aws-sdk/client-sqs';
 import { Module } from '@nestjs/common';
 import { INTEGRATION_CONFIG, type IntegrationConfig } from '../config/integration.config.js';
 import { IntakeModule } from '../intake/intake.module.js';
+import { ReconciliationStoreModule } from '../reconciliation/reconciliation.module.js';
 import { SyncLogModule } from '../sync-log/sync-log.module.js';
 import { AdminController } from './admin.controller.js';
 import { AdminService } from './admin.service.js';
@@ -14,9 +15,9 @@ function createQueueStats(config: IntegrationConfig): QueueStatsReader {
     : new NoQueueStats();
 }
 
-/** /admin/* for the dashboard. The dispatcher comes from IntakeModule (replay re-queues). */
+/** /admin/* for the dashboard. The dispatcher comes from IntakeModule (replay re-queues); the last reconciliation from its store. */
 @Module({
-  imports: [SyncLogModule, IntakeModule],
+  imports: [SyncLogModule, IntakeModule, ReconciliationStoreModule],
   controllers: [AdminController],
   providers: [
     AdminService,

@@ -10,7 +10,7 @@ import {
   type StatusKey,
   type SyncSummary,
 } from './sync-list.js';
-import type { SyncLogRepository, SyncRecord } from './sync-record.js';
+import type { SyncLogRepository, SyncRecord, SyncRef } from './sync-record.js';
 
 const BY_STATUS = 'byStatus';
 /** List rows don't need the payload or history: smaller responses. */
@@ -97,6 +97,28 @@ export class DynamoDbSyncLogRepository implements SyncLogRepository {
       }),
     );
     return counts;
+  }
+
+  async listSince(status: SyncStatus, sinceIso: string): Promise<SyncRef[]> {
+    const fields = ['eventId', 'flow', 'businessKey', 'erpRecordType', 'erpRecordId', 'updatedAt'];
+    const refs: SyncRef[] = [];
+    let startKey: Record<string, unknown> | undefined;
+    do {
+      const res = await this.db.send(
+        new QueryCommand({
+          TableName: this.tableName,
+          IndexName: BY_STATUS,
+          KeyConditionExpression: '#s = :s AND updatedAt >= :since',
+          ExpressionAttributeNames: { '#s': 'status', ...Object.fromEntries(fields.map((f) => [`#f_${f}`, f])) },
+          ExpressionAttributeValues: { ':s': status, ':since': sinceIso },
+          ProjectionExpression: fields.map((f) => `#f_${f}`).join(', '),
+          ExclusiveStartKey: startKey,
+        }),
+      );
+      refs.push(...((res.Items ?? []) as SyncRef[]));
+      startKey = res.LastEvaluatedKey;
+    } while (startKey);
+    return refs;
   }
 
   /** One status, newest first, filtered: up to `need` matches after `startKey`. */

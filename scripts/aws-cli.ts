@@ -5,6 +5,8 @@
 // from `aws login --profile ledgerbridge` and last 12 hours.
 
 import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 /** Our AWS project only allows resources in its selected Region. */
@@ -38,6 +40,35 @@ export function aws(args: string[]): string {
     stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...process.env, PYTHONUTF8: '1' },
   });
+}
+
+/**
+ * Calls a deployed Lambda and waits for its answer. Returns what the function
+ * returned (parsed JSON). Throws if the function itself failed.
+ */
+export function invokeLambda(functionName: string, payload: unknown): unknown {
+  const dir = mkdtempSync(path.join(tmpdir(), 'lb-invoke-'));
+  const outFile = path.join(dir, 'out.json');
+  try {
+    const meta = JSON.parse(
+      aws([
+        'lambda', 'invoke',
+        '--function-name', functionName,
+        '--cli-binary-format', 'raw-in-base64-out',
+        '--payload', JSON.stringify(payload),
+        '--cli-read-timeout', '320', // the reconcile Lambda may take up to 5 minutes
+        outFile,
+      ]),
+    ) as { FunctionError?: string };
+    const result = JSON.parse(readFileSync(outFile, 'utf8')) as unknown;
+    if (meta.FunctionError) {
+      const { errorMessage } = (result ?? {}) as { errorMessage?: string };
+      throw new Error(`${functionName} failed: ${errorMessage ?? JSON.stringify(result)}`);
+    }
+    return result;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 /** A hint to print when an AWS call failed because the login expired. */

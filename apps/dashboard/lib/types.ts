@@ -50,7 +50,29 @@ export interface Stats {
   byStatus: Record<SyncStatus, number>;
   byFlow: Record<Flow, Record<SyncStatus, number>>;
   queues?: { queue: QueueDepth; dlq: QueueDepth };
-  reconciliation: null;
+  /** The last reconciliation run; null before the first one. */
+  reconciliation: ReconciliationReport | null;
+}
+
+export const RECONCILED_TYPES = ['invoice', 'customerPayment', 'vendorBill'] as const;
+export type ReconciledType = (typeof RECONCILED_TYPES)[number];
+
+export interface Mismatch {
+  kind: 'MISSING_IN_ERP' | 'MISSING_IN_LEDGERBRIDGE' | 'ERP_ID_CHANGED';
+  recordType: ReconciledType;
+  externalId: string;
+  erpRecordId?: string;
+  eventId?: string;
+}
+
+export interface ReconciliationReport {
+  runAt: string;
+  since: string;
+  until: string;
+  byType: Record<ReconciledType, { synced: number; createdInErp: number; matched: number }>;
+  mismatchCount: number;
+  /** At most 100; mismatchCount has the full number. */
+  mismatches: Mismatch[];
 }
 
 export interface SyncFilters {

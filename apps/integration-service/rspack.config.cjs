@@ -48,11 +48,12 @@ function isMissingOptionalPackage(resource) {
  * @param {typeof import('@rspack/core')} rspack
  */
 const ENTRIES = {
-  // One entry per Lambda. Later phases add reconcile, ...
+  // One entry per Lambda.
   http: './src/lambda/http.ts',
   worker: './src/lambda/worker.ts',
   csv: './src/lambda/csv.ts',
   dlq: './src/lambda/dlq.ts',
+  reconcile: './src/lambda/reconcile.ts',
 };
 
 module.exports = (defaults, rspack) => ({

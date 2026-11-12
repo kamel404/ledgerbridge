@@ -1,4 +1,4 @@
-import { FLOWS, SYNC_STATUSES, type Flow, type SyncFilters, type SyncStatus } from './types';
+import { FLOWS, SYNC_STATUSES, type Flow, type Mismatch, type SyncFilters, type SyncStatus } from './types';
 
 /** "3 min ago", "2 h ago", "5 d ago" (or "just now"). */
 export function timeAgo(iso: string, now = Date.now()): string {
@@ -23,6 +23,22 @@ export const STATUS_INFO: Record<SyncStatus, { tone: 'ok' | 'busy' | 'warn' | 'b
   FAILED: { tone: 'bad', meaning: 'Failed for good: the data or a mapping needs fixing, then Replay' },
   DEAD: { tone: 'bad', meaning: 'Failed 4 times in a row (e.g. ERP down); Replay once the cause is fixed' },
   REJECTED: { tone: 'muted', meaning: 'Refused at the door: not a valid event' },
+};
+
+/** What each reconciliation mismatch means, and what to do about it. */
+export const MISMATCH_INFO: Record<Mismatch['kind'], { label: string; meaning: string }> = {
+  MISSING_IN_ERP: {
+    label: 'Missing in the ERP',
+    meaning: 'Synced successfully, but the ERP no longer has it. Was it deleted in the ERP?',
+  },
+  MISSING_IN_LEDGERBRIDGE: {
+    label: 'Not from LedgerBridge',
+    meaning: 'Created in the ERP without a successful event. Entered by hand, or the event did not end SUCCEEDED.',
+  },
+  ERP_ID_CHANGED: {
+    label: 'Re-created in the ERP',
+    meaning: 'The ERP has this record under a different internal ID than the one LedgerBridge stored.',
+  },
 };
 
 export const REPLAYABLE: readonly SyncStatus[] = ['FAILED', 'DEAD'];
