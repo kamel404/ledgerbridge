@@ -1,0 +1,131 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" width="1280" height="720" role="img" aria-labelledby="t d" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <title id="t">How LedgerBridge works</title>
+  <desc id="d">Business apps send events to a front door that verifies them and puts them on a queue. A worker takes each event, translates it and writes it to the ERP exactly once. Temporary failures are retried automatically. An event that still fails after four tries is parked in a dead-letter queue, an alert email is sent, and an operator replays it from the dashboard.</desc>
+
+  <defs>
+    <marker id="a-main" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#cbd5e1"/></marker>
+    <marker id="a-retry" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#fbbf24"/></marker>
+    <marker id="a-fail" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#f87171"/></marker>
+    <marker id="a-replay" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#34d399"/></marker>
+  </defs>
+
+  <rect width="1280" height="720" rx="24" fill="#0f172a"/>
+
+  <!-- Heading -->
+  <text x="40" y="62" fill="#f8fafc" font-size="32" font-weight="700">How LedgerBridge works</text>
+  <text x="40" y="94" fill="#94a3b8" font-size="17">Business events go in on the left. Correct finance records come out on the right, exactly once.</text>
+
+  <!-- ============ Row 1: the normal path ============ -->
+  <g text-anchor="middle">
+    <!-- 1 Business apps -->
+    <rect x="40" y="130" width="200" height="160" rx="16" fill="#1e293b" stroke="#60a5fa" stroke-width="2"/>
+    <circle cx="66" cy="156" r="14" fill="#60a5fa"/>
+    <text x="66" y="161" font-size="14" font-weight="700" fill="#0f172a">1</text>
+    <text x="140" y="194" font-size="22" font-weight="700" fill="#f8fafc">Business apps</text>
+    <text x="140" y="216" font-size="13" fill="#60a5fa">billing · procurement · CSV</text>
+    <text x="140" y="248" font-size="14" fill="#cbd5e1">Send an event: invoice,</text>
+    <text x="140" y="268" font-size="14" fill="#cbd5e1">payment or vendor bill</text>
+
+    <!-- 2 Front door -->
+    <rect x="290" y="130" width="200" height="160" rx="16" fill="#1e293b" stroke="#a78bfa" stroke-width="2"/>
+    <circle cx="316" cy="156" r="14" fill="#a78bfa"/>
+    <text x="316" y="161" font-size="14" font-weight="700" fill="#0f172a">2</text>
+    <text x="390" y="194" font-size="22" font-weight="700" fill="#f8fafc">Front door</text>
+    <text x="390" y="216" font-size="13" fill="#a78bfa">API Gateway + Lambda</text>
+    <text x="390" y="248" font-size="14" fill="#cbd5e1">Verifies the sender,</text>
+    <text x="390" y="268" font-size="14" fill="#cbd5e1">replies in milliseconds</text>
+
+    <!-- 3 Queue -->
+    <rect x="540" y="130" width="200" height="160" rx="16" fill="#1e293b" stroke="#fbbf24" stroke-width="2"/>
+    <circle cx="566" cy="156" r="14" fill="#fbbf24"/>
+    <text x="566" y="161" font-size="14" font-weight="700" fill="#0f172a">3</text>
+    <text x="640" y="194" font-size="22" font-weight="700" fill="#f8fafc">Queue</text>
+    <text x="640" y="216" font-size="13" fill="#fbbf24">Amazon SQS</text>
+    <text x="640" y="248" font-size="14" fill="#cbd5e1">Holds every event</text>
+    <text x="640" y="268" font-size="14" fill="#cbd5e1">until it is processed</text>
+
+    <!-- 4 Worker -->
+    <rect x="790" y="130" width="200" height="160" rx="16" fill="#1e293b" stroke="#34d399" stroke-width="2"/>
+    <circle cx="816" cy="156" r="14" fill="#34d399"/>
+    <text x="816" y="161" font-size="14" font-weight="700" fill="#0f172a">4</text>
+    <text x="890" y="194" font-size="22" font-weight="700" fill="#f8fafc">Worker</text>
+    <text x="890" y="216" font-size="13" fill="#34d399">Lambda</text>
+    <text x="890" y="248" font-size="14" fill="#cbd5e1">Translates the data,</text>
+    <text x="890" y="268" font-size="14" fill="#cbd5e1">writes it exactly once</text>
+
+    <!-- 5 ERP -->
+    <rect x="1040" y="130" width="200" height="160" rx="16" fill="#1e293b" stroke="#22d3ee" stroke-width="2"/>
+    <circle cx="1066" cy="156" r="14" fill="#22d3ee"/>
+    <text x="1066" y="161" font-size="14" font-weight="700" fill="#0f172a">5</text>
+    <text x="1140" y="194" font-size="22" font-weight="700" fill="#f8fafc">ERP</text>
+    <text x="1140" y="216" font-size="13" fill="#22d3ee">NetSuite-style API</text>
+    <text x="1140" y="248" font-size="14" fill="#cbd5e1">The finance system</text>
+    <text x="1140" y="268" font-size="14" fill="#cbd5e1">of record</text>
+  </g>
+
+  <!-- Row 1 arrows -->
+  <g stroke="#cbd5e1" stroke-width="2.5" fill="none" marker-end="url(#a-main)">
+    <path d="M244 210H286"/>
+    <path d="M494 210H536"/>
+    <path d="M744 210H786"/>
+    <path d="M994 210H1036"/>
+  </g>
+
+  <!-- Retry loop: worker back to queue -->
+  <path d="M890 294V336H680V296" stroke="#fbbf24" stroke-width="2.5" stroke-dasharray="7 5" fill="none" marker-end="url(#a-retry)"/>
+  <text x="700" y="361" font-size="14" fill="#fbbf24">ERP busy or down? Retried automatically after 10 s, 30 s, 90 s</text>
+
+  <!-- Queue down to dead-letter queue -->
+  <path d="M600 294V426" stroke="#f87171" stroke-width="2.5" fill="none" marker-end="url(#a-fail)"/>
+  <text x="614" y="400" font-size="14" fill="#f87171">still failing after 4 tries</text>
+
+  <!-- ============ Row 2: when something goes wrong ============ -->
+  <text x="40" y="462" fill="#f8fafc" font-size="22" font-weight="700">When something goes wrong</text>
+  <text x="40" y="492" fill="#94a3b8" font-size="15">A failed event is never dropped. It is retried,</text>
+  <text x="40" y="514" fill="#94a3b8" font-size="15">then parked, and a person is told about it.</text>
+
+  <g text-anchor="middle">
+    <!-- 6 Dead-letter queue -->
+    <rect x="540" y="430" width="200" height="110" rx="16" fill="#1e293b" stroke="#f87171" stroke-width="2"/>
+    <circle cx="564" cy="454" r="13" fill="#f87171"/>
+    <text x="564" y="459" font-size="13" font-weight="700" fill="#0f172a">6</text>
+    <text x="640" y="488" font-size="18" font-weight="700" fill="#f8fafc">Dead-letter queue</text>
+    <text x="640" y="511" font-size="13.5" fill="#cbd5e1">Parks the failed event,</text>
+    <text x="640" y="528" font-size="13.5" fill="#cbd5e1">nothing is lost</text>
+
+    <!-- 7 Alert email -->
+    <rect x="790" y="430" width="200" height="110" rx="16" fill="#1e293b" stroke="#fb923c" stroke-width="2"/>
+    <circle cx="814" cy="454" r="13" fill="#fb923c"/>
+    <text x="814" y="459" font-size="13" font-weight="700" fill="#0f172a">7</text>
+    <text x="890" y="488" font-size="18" font-weight="700" fill="#f8fafc">Alert email</text>
+    <text x="890" y="511" font-size="13.5" fill="#cbd5e1">A CloudWatch alarm</text>
+    <text x="890" y="528" font-size="13.5" fill="#cbd5e1">tells the operator</text>
+
+    <!-- 8 Dashboard -->
+    <rect x="1040" y="430" width="200" height="110" rx="16" fill="#1e293b" stroke="#34d399" stroke-width="2"/>
+    <circle cx="1064" cy="454" r="13" fill="#34d399"/>
+    <text x="1064" y="459" font-size="13" font-weight="700" fill="#0f172a">8</text>
+    <text x="1140" y="488" font-size="18" font-weight="700" fill="#f8fafc">Dashboard</text>
+    <text x="1140" y="511" font-size="13.5" fill="#cbd5e1">See the error, fix the</text>
+    <text x="1140" y="528" font-size="13.5" fill="#cbd5e1">cause, click Replay</text>
+  </g>
+
+  <g stroke="#cbd5e1" stroke-width="2.5" fill="none" marker-end="url(#a-main)">
+    <path d="M744 485H786"/>
+    <path d="M994 485H1036"/>
+  </g>
+
+  <!-- Replay: dashboard back to the queue -->
+  <path d="M1140 544V584H515V265H536" stroke="#34d399" stroke-width="2.5" fill="none" marker-end="url(#a-replay)"/>
+  <text x="828" y="608" text-anchor="middle" font-size="14" fill="#34d399">Replay: the event goes back on the queue and runs again</text>
+
+  <!-- ============ Footer: the three promises ============ -->
+  <g text-anchor="middle" font-size="15">
+    <rect x="40" y="640" width="380" height="50" rx="25" fill="#1e293b"/>
+    <text x="230" y="671" fill="#cbd5e1"><tspan font-weight="700" fill="#f8fafc">No duplicates.</tspan> Retries are always safe</text>
+    <rect x="450" y="640" width="380" height="50" rx="25" fill="#1e293b"/>
+    <text x="640" y="671" fill="#cbd5e1"><tspan font-weight="700" fill="#f8fafc">Nothing lost.</tspan> Failures are parked, not dropped</text>
+    <rect x="860" y="640" width="380" height="50" rx="25" fill="#1e293b"/>
+    <text x="1050" y="671" fill="#cbd5e1"><tspan font-weight="700" fill="#f8fafc">Everything visible.</tspan> Every step is logged</text>
+  </g>
+</svg>
