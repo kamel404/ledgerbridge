@@ -23,6 +23,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.1167.0",
+    "@aws-sdk/lib-dynamodb": "^3.1167.0",
     "@codegenie/serverless-express": "^5.0.0",
     "@ledgerbridge/shared": "*",
     "@nestjs/common": "^12.0.1",

@@ -1,0 +1,13 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    // `node bin/app.ts` runs this code directly (Node strips the types), so
+    // only syntax Node can erase is allowed, and type-only imports must say `import type`.
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "allowImportingTsExtensions": true,
+    "types": ["node", "vitest/globals"]
+  },
+  "include": ["bin", "lib", "test"]
+}

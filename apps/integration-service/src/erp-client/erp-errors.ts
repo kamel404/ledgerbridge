@@ -14,6 +14,7 @@ interface NetSuiteErrorBody {
  *
  *   429                      -> retryable (ERP_RATE_LIMITED, with Retry-After)
  *   5xx, 408                 -> retryable (ERP down or overloaded)
+ *   409                      -> retryable (concurrent write on the same record)
  *   401 (after one refresh)  -> retryable (ERP_AUTH_FAILED): usually rotated
  *                               credentials; retries pick up the new secret,
  *                               and if not, the message ends in the DLQ
@@ -35,7 +36,8 @@ export function erpErrorFromResponse(
       retryAfterSeconds: parseRetryAfter(retryAfterHeader),
     });
   }
-  if (status >= 500 || status === 408) {
+  // 409: another request changed the record at the same moment; trying again works.
+  if (status >= 500 || status === 408 || status === 409) {
     return new RetryableError(`ERP_${erpCode ?? 'SERVER_ERROR'}`, message);
   }
   if (status === 401) {

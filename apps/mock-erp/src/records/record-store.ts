@@ -13,6 +13,13 @@ export interface StoredRecord {
   computed: Record<string, unknown>;
   createdDate: string;
   lastModifiedDate: string;
+  /**
+   * Set by the store when it reads a record; undefined for a new record.
+   * The DynamoDB store refuses to save if the stored version changed since the
+   * read (optimistic locking), so two Lambdas can't overwrite each other's
+   * changes. The in-memory store ignores it (one process, WriteLock).
+   */
+  version?: number;
 }
 
 /**

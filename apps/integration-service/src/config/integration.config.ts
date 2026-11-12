@@ -2,8 +2,12 @@ import { z } from 'zod';
 
 /**
  * Settings of the integration service, read once from environment variables.
- * Secrets are NOT here: they come from a SecretsProvider (env vars locally,
- * Secrets Manager in AWS from Phase 4).
+ * Secret *values* are NOT here: they come from a SecretsProvider (env vars
+ * locally, Secrets Manager on AWS). Only secret *names* are.
+ *
+ * On AWS, CDK sets the table/queue/secret names on each Lambda. Locally they
+ * are unset, and the service falls back to in-memory storage, inline
+ * processing and secrets from .env.
  */
 const EnvSchema = z.object({
   /** Where the ERP lives. Pointing at real NetSuite later is a config change. */
@@ -12,12 +16,24 @@ const EnvSchema = z.object({
   ERP_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
   /** Max age of a webhook's X-Timestamp (SPEC §8.1: 5 minutes). */
   WEBHOOK_TOLERANCE_SECONDS: z.coerce.number().int().positive().default(300),
+  /** DynamoDB SyncLog table. Unset = in-memory sync log. */
+  SYNC_LOG_TABLE: z.string().min(1).optional(),
+  /** SQS queue URL. Unset = process events inline (no queue). */
+  SYNC_QUEUE_URL: z.url().optional(),
+  /** Secrets Manager secret holding {"billing": "...", "procurement": "..."}. Unset = env vars. */
+  WEBHOOK_SECRET_NAME: z.string().min(1).optional(),
+  /** Secrets Manager secret holding {"clientId": "...", "clientSecret": "..."} (Phase 4). */
+  ERP_SECRET_NAME: z.string().min(1).optional(),
 });
 
 export interface IntegrationConfig {
   erpBaseUrl: string;
   erpTimeoutMs: number;
   webhookToleranceSeconds: number;
+  syncLogTable?: string;
+  syncQueueUrl?: string;
+  webhookSecretName?: string;
+  erpSecretName?: string;
 }
 
 export const INTEGRATION_CONFIG = Symbol('INTEGRATION_CONFIG');
@@ -34,5 +50,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): IntegrationCon
     erpBaseUrl: e.ERP_BASE_URL.replace(/\/+$/, ''),
     erpTimeoutMs: e.ERP_TIMEOUT_MS,
     webhookToleranceSeconds: e.WEBHOOK_TOLERANCE_SECONDS,
+    ...(e.SYNC_LOG_TABLE && { syncLogTable: e.SYNC_LOG_TABLE }),
+    ...(e.SYNC_QUEUE_URL && { syncQueueUrl: e.SYNC_QUEUE_URL }),
+    ...(e.WEBHOOK_SECRET_NAME && { webhookSecretName: e.WEBHOOK_SECRET_NAME }),
+    ...(e.ERP_SECRET_NAME && { erpSecretName: e.ERP_SECRET_NAME }),
   };
 }

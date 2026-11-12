@@ -18,6 +18,7 @@ export type NetSuiteErrorCode =
   | 'INVALID_SUITEQL' // query outside the supported grammar
   | 'INVALID_LOGIN' // missing / invalid / expired token
   | 'REQUEST_LIMIT_EXCEEDED' // rate limited (429)
+  | 'RCRD_HAS_BEEN_CHANGED' // concurrent write lost the race (409, retry)
   | 'SERVICE_UNAVAILABLE' // chaos 503
   | 'NOT_FOUND' // unknown route
   | 'UNEXPECTED_ERROR'; // bug
@@ -27,6 +28,7 @@ const STATUS_INFO: Record<number, { title: string; type: string }> = {
   401: { title: 'Unauthorized', type: 'https://www.rfc-editor.org/rfc/rfc9110.html#section-15.5.2' },
   404: { title: 'Not Found', type: 'https://www.rfc-editor.org/rfc/rfc9110.html#section-15.5.5' },
   405: { title: 'Method Not Allowed', type: 'https://www.rfc-editor.org/rfc/rfc9110.html#section-15.5.6' },
+  409: { title: 'Conflict', type: 'https://www.rfc-editor.org/rfc/rfc9110.html#section-15.5.10' },
   429: { title: 'Too Many Requests', type: 'https://www.rfc-editor.org/rfc/rfc6585.html#section-4' },
   500: { title: 'Internal Server Error', type: 'https://www.rfc-editor.org/rfc/rfc9110.html#section-15.6.1' },
   503: { title: 'Service Unavailable', type: 'https://www.rfc-editor.org/rfc/rfc9110.html#section-15.6.4' },

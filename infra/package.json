@@ -1,0 +1,26 @@
+{
+  "name": "infra",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "AWS CDK app: MockErpStack and LedgerBridgeStack",
+  "scripts": {
+    "cdk": "cdk",
+    "synth": "cdk synth",
+    "diff": "cdk diff",
+    "deploy": "cdk deploy --all",
+    "destroy": "cdk destroy --all",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "^2.276.0",
+    "constructs": "^10.4.2"
+  },
+  "devDependencies": {
+    "aws-cdk": "^2.1100.0",
+    "@types/node": "^24.0.0",
+    "typescript": "^6.0.2",
+    "vitest": "^4.1.2"
+  }
+}

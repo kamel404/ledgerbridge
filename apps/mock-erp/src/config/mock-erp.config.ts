@@ -15,6 +15,8 @@ const EnvSchema = z.object({
   CHAOS_LATENCY_MS: z.coerce.number().int().min(0).default(0),
   /** Max ERP requests per second before 429. 0 turns the limit off. */
   RATE_LIMIT_PER_SECOND: z.coerce.number().int().min(0).default(25),
+  /** DynamoDB table for records. Unset = in-memory store (local development). */
+  MOCK_ERP_TABLE_NAME: z.string().min(1).optional(),
 });
 
 export interface MockErpConfig {
@@ -23,6 +25,8 @@ export interface MockErpConfig {
   jwtSecret: string;
   tokenTtlSeconds: number;
   chaos: ChaosSettings;
+  /** Set on AWS: records live in this DynamoDB table instead of memory. */
+  tableName?: string;
 }
 
 export interface ChaosSettings {
@@ -51,5 +55,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): MockErpConfig 
       latencyMs: e.CHAOS_LATENCY_MS,
       rateLimitPerSecond: e.RATE_LIMIT_PER_SECOND,
     },
+    ...(e.MOCK_ERP_TABLE_NAME && { tableName: e.MOCK_ERP_TABLE_NAME }),
   };
 }

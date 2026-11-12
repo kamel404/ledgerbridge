@@ -304,15 +304,15 @@ By hand (needs a `.env`, copied from `.env.example`):
 
 ### Tasks
 
-- [ ] Create `infra/` (CDK TypeScript app) as a workspace
-- [ ] **MockErpStack:** DynamoDB table (`pk` = record type, `sk` = internal ID, GSI on `externalId`, counter items), Lambda from the rspack bundle in `dist-lambda/` (`lambda.Function` + `Code.fromAsset`, handler `http.handler`, not `NodejsFunction`), HTTP API, outputs the URL
-- [ ] `DynamoRecordStore` implementing the Phase 1 interface; choose the store from config
-- [ ] Mock ERP client secret: for now an env var on the *mock* is acceptable (it's the fake ERP, not our product). Our product's copy moves to Secrets Manager in Phase 4.
-- [ ] **LedgerBridgeStack:** SQS queue + DLQ (`maxReceiveCount: 4`), `SyncLog` table (`pk = eventId`, GSI `byStatus` with `sk = updatedAt`, TTL attribute), ingest Lambda (`lambda/http.ts`) behind an HTTP API with throttling
-- [ ] Ingest now really: conditional write for dedup (repeat → `200`, nothing else), `RECEIVED` record, `SendMessage`, `202 { syncId }`; invalid → `REJECTED` record + `400`
-- [ ] One IAM role per Lambda, granted only what it needs
-- [ ] 7-day log retention on every function
-- [ ] Root script: `npm run deploy` = build everything, then `cdk deploy --all`
+- [x] Create `infra/` (CDK TypeScript app) as a workspace
+- [x] **MockErpStack:** DynamoDB table (`pk` = record type, `sk` = internal ID, GSI on `externalId`, counter items) *(built with external-ID lookup items instead of a GSI, see decisions below)*, Lambda from the rspack bundle in `dist-lambda/` (`lambda.Function` + `Code.fromAsset`, handler `http.handler`, not `NodejsFunction`), HTTP API, outputs the URL
+- [x] `DynamoRecordStore` implementing the Phase 1 interface; choose the store from config
+- [x] Mock ERP client secret: for now an env var on the *mock* is acceptable (it's the fake ERP, not our product). Our product's copy moves to Secrets Manager in Phase 4. *(The webhook secret already moved in Phase 3.)*
+- [x] **LedgerBridgeStack:** SQS queue + DLQ (`maxReceiveCount: 4`), `SyncLog` table (`pk = eventId`, GSI `byStatus` with `sk = updatedAt`, TTL attribute), ingest Lambda (`lambda/http.ts`) behind an HTTP API with throttling
+- [x] Ingest now really: conditional write for dedup (repeat → `200`, nothing else), `RECEIVED` record, `SendMessage`, `202 { syncId }`; invalid → `REJECTED` record + `400`
+- [x] One IAM role per Lambda, granted only what it needs
+- [x] 7-day log retention on every function
+- [x] Root script: `npm run deploy` = build everything, then `cdk deploy --all`
 
 ### Done when
 
@@ -320,11 +320,26 @@ A signed webhook sent to the real URL returns `202` and the message appears in S
 
 ### How to check
 
-1. `cdk deploy --all --profile ledgerbridge`, then copy the output URLs.
-2. Point the simulator at the URL and send one event.
-3. Console → SQS → your queue → **Send and receive messages** → **Poll for messages**: the event is there.
-4. Console → DynamoDB → `SyncLog` → **Explore items**: one `RECEIVED` item.
-5. Console → CloudWatch → Log groups → the ingest Lambda: one invocation, no errors.
+1. Once: `npm run aws:secrets` (creates `.env.aws` and the webhook secret) and `npm run cdk -- bootstrap --profile ledgerbridge`.
+2. `npm run deploy`. The URLs land in `infra/cdk-outputs.json`.
+3. `npm run simulate -- one --aws` sends one signed event to the real URL and expects `202`.
+4. Console (Region **eu-north-1**, top right) → SQS → `SyncQueue` → **Send and receive messages** → **Poll for messages**: the event is there.
+5. Console → DynamoDB → Tables → the `SyncLog` table → **Explore table items**: one `RECEIVED` item.
+6. Console → CloudWatch → Log groups → the ingest Lambda's group: one invocation, no errors.
+
+Automated, no AWS needed: `npm test -w infra` checks the templates (redrive after 4 receives, TTL, 7-day logs, least-privilege grants, throttling).
+
+### Decisions made while building it
+
+- **Region is fixed to eu-north-1** in `infra/bin/app.ts`. Our AWS project (new AWS experience) only allows resources in its selected Region. The CLI login is `aws login --profile ledgerbridge` (12-hour credentials), not `aws configure sso`; IAM Identity Center isn't available in this experience and isn't needed.
+- **CDK app runs with plain `node bin/app.ts`** (Node strips the types), so no `ts-node`/`tsx`. `tsconfig` enforces `erasableSyntaxOnly` + `verbatimModuleSyntax` so that stays possible.
+- **Mock ERP storage: lookup items instead of a GSI on externalId.** A GSI is updated just *after* a write and can't be read with strong consistency, so a quick retry could miss a record and create a duplicate. Each external ID gets its own item (`pk = <type>#eid`, `sk = <externalId>`), read with `ConsistentRead` and claimed with a conditional write inside the same transaction as the record. Duplicates are impossible even with several Lambda copies at once.
+- **Optimistic locking in the mock**: records carry a `version`. A save fails with `409 RCRD_HAS_BEEN_CHANGED` if someone else saved first (e.g. two payments for one invoice at the same moment). The integration treats 409 as retryable.
+- **Dynamo/SQS/Secrets Manager are picked from config.** Each app checks for `MOCK_ERP_TABLE_NAME`, `SYNC_LOG_TABLE`, `SYNC_QUEUE_URL` and `WEBHOOK_SECRET_NAME`; CDK sets them on the Lambdas. Unset (local, tests) → in-memory store, inline processing and `.env` secrets, exactly as in Phase 2.
+- **Webhook secrets moved to Secrets Manager now, not Phase 4**, so they never sit in Lambda environment variables. `npm run aws:secrets` generates strong values, keeps a local copy in `.env.aws` (gitignored; the simulator signs with it), and creates or updates `ledgerbridge/webhooks`. The stack references the secret by name, so its value is never in a CloudFormation template. The values reach the AWS CLI through a temp file, never the command line.
+- **`DynamoSyncLogRepository` is here already** (the plan listed it for Phase 4): ingest's dedup *is* its conditional put.
+- **Queue message** = `{ "eventId", "event" }`, with an `eventType` message attribute. The Phase 4 worker reads exactly that.
+- **Npm on a slow connection**: `aws-cdk-lib` is a ~40 MB download that npm can't resume. If `npm install` keeps failing with `ECONNRESET`, download the tarball with `curl -C -` (which resumes), `npm cache add` it, then `npm install --prefer-offline`.
 
 ---
 

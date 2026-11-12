@@ -10,6 +10,8 @@ build/
 # AWS CDK
 cdk.out/
 .cdk.staging/
+# Deployed URLs etc. (`npm run deploy` writes it)
+cdk-outputs.json
 
 # Environment / secrets
 .env

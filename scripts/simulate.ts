@@ -3,14 +3,19 @@
 //   npm run simulate -- happy        10 invoices, their payments, 5 vendor bills,
 //                                    then checks the results in the mock ERP
 //
+//   npm run simulate -- one          one invoice event; prints the response
+//
 // More commands (duplicates, out-of-order, bad-signature, ...) arrive in Phase 4.
 //
 // Options:
+//   --aws          send to the deployed AWS API instead of localhost. The URLs
+//                  come from infra/cdk-outputs.json (written by `npm run deploy`)
+//                  and the secrets from .env.aws (`npm run aws:secrets`).
 //   --delay <ms>   pause between webhooks (default 200). Each event costs the
 //                  ERP 2-3 requests and the mock allows 25/s; until the queue
 //                  retries 429s (Phase 4), a burst would leave events RETRYING.
 //
-// Settings come from the repo-root .env (see .env.example):
+// Local settings come from the repo-root .env (see .env.example):
 //   INTEGRATION_URL (default http://localhost:$INTEGRATION_SERVICE_PORT)
 //   ERP_BASE_URL, MOCK_ERP_CLIENT_ID, MOCK_ERP_CLIENT_SECRET   (for the check)
 //   WEBHOOK_SECRET_BILLING, WEBHOOK_SECRET_PROCUREMENT
@@ -18,17 +23,38 @@
 // Runs with plain `node` (Node 22.18+ strips the TypeScript types itself).
 
 import { createHmac } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-const envFile = fileURLToPath(new URL('../.env', import.meta.url));
+const args = process.argv.slice(2);
+const ON_AWS = args.includes('--aws');
+
+const repoFile = (name: string) => fileURLToPath(new URL(`../${name}`, import.meta.url));
+const envFile = repoFile(ON_AWS ? '.env.aws' : '.env');
 if (existsSync(envFile)) process.loadEnvFile(envFile);
+else if (ON_AWS) {
+  console.error('.env.aws is missing. Run `npm run aws:secrets` first.');
+  process.exit(2);
+}
+
+/** URLs of the deployed stacks, from `cdk deploy --outputs-file`. */
+function awsOutputs(): { apiUrl: string; erpUrl: string } {
+  const file = repoFile('infra/cdk-outputs.json');
+  if (!existsSync(file)) {
+    console.error('infra/cdk-outputs.json is missing. Run `npm run deploy` first.');
+    process.exit(2);
+  }
+  const outputs = JSON.parse(readFileSync(file, 'utf8')) as Record<string, Record<string, string>>;
+  return { apiUrl: outputs.LedgerBridgeStack?.ApiUrl ?? '', erpUrl: outputs.MockErpStack?.MockErpUrl ?? '' };
+}
 
 const env = process.env;
-const INTEGRATION_URL = (env.INTEGRATION_URL ?? `http://localhost:${env.INTEGRATION_SERVICE_PORT ?? 3000}`).replace(/\/+$/, '');
-const ERP_URL = (env.ERP_BASE_URL ?? 'http://localhost:3001').replace(/\/+$/, '');
+const deployed = ON_AWS ? awsOutputs() : undefined;
+const INTEGRATION_URL = (
+  deployed?.apiUrl ?? env.INTEGRATION_URL ?? `http://localhost:${env.INTEGRATION_SERVICE_PORT ?? 3000}`
+).replace(/\/+$/, '');
+const ERP_URL = (deployed?.erpUrl ?? env.ERP_BASE_URL ?? 'http://localhost:3001').replace(/\/+$/, '');
 
-const args = process.argv.slice(2);
 const delayArg = args.indexOf('--delay');
 const DELAY_MS = delayArg >= 0 ? Number(args[delayArg + 1]) : 200;
 if (!Number.isFinite(DELAY_MS) || DELAY_MS < 0) {
@@ -307,7 +333,16 @@ async function happy(): Promise<boolean> {
   return ok && problems.length === 0;
 }
 
-const COMMANDS: Record<string, () => Promise<boolean>> = { happy };
+/** Sends one invoice event. On AWS (Phase 3) the expected answer is 202 { syncId }: queued. */
+async function one(): Promise<boolean> {
+  const inv = makeInvoice(0);
+  console.log(`Sending ${String(inv.event.type)} ${inv.invoiceId} (event ${String(inv.event.id)}) to ${INTEGRATION_URL}`);
+  const res = await send('billing', inv.event);
+  console.log(`  ${res.status} ${JSON.stringify(res.body)}`);
+  return res.status === 202;
+}
+
+const COMMANDS: Record<string, () => Promise<boolean>> = { happy, one };
 
 const command = args.find((a, i) => !a.startsWith('--') && args[i - 1] !== '--delay');
 const run = command ? COMMANDS[command] : undefined;

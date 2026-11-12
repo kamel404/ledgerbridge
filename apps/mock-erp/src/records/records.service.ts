@@ -142,6 +142,7 @@ export class RecordsService {
       computed: {},
       createdDate: existing?.createdDate ?? now,
       lastModifiedDate: now,
+      ...(existing?.version !== undefined && { version: existing.version }),
     };
 
     const alsoChanged = await this.applyBusinessRules(record, existing);

@@ -4,7 +4,8 @@
   "description": "Integration hub syncing billing and procurement apps into an ERP",
   "workspaces": [
     "packages/*",
-    "apps/*"
+    "apps/*",
+    "infra"
   ],
   "engines": {
     "node": ">=20"
@@ -18,6 +19,11 @@
     "test": "npm run build:shared && npm run test --workspaces --if-present",
     "test:e2e": "npm run build:shared && npm run test:e2e --workspaces --if-present",
     "invoke:lambda": "node --no-deprecation scripts/invoke-lambda.mjs",
-    "simulate": "node --no-warnings scripts/simulate.ts"
+    "simulate": "node --no-warnings scripts/simulate.ts",
+    "aws:secrets": "node --no-warnings scripts/aws-secrets.ts",
+    "cdk": "npm run cdk -w infra --",
+    "synth": "npm run build:lambda && npm run cdk -w infra -- synth --profile ledgerbridge",
+    "deploy": "npm run build:lambda && npm run cdk -w infra -- deploy --all --outputs-file cdk-outputs.json --profile ledgerbridge",
+    "destroy": "npm run cdk -w infra -- destroy --all --profile ledgerbridge"
   }
 }
