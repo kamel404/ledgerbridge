@@ -108,6 +108,72 @@ describe('LedgerBridgeStack', () => {
     });
   });
 
+  it('the DLQ handler is triggered by the DLQ and can only touch the sync log', () => {
+    template.hasResourceProperties('AWS::Lambda::Function', { Handler: 'dlq.handler' });
+    template.hasResourceProperties('AWS::Lambda::EventSourceMapping', {
+      EventSourceArn: { 'Fn::GetAtt': [Match.stringLikeRegexp('^SyncDLQ'), 'Arn'] },
+      FunctionResponseTypes: ['ReportBatchItemFailures'],
+    });
+    const policy = policyOf('DlqHandler');
+    expect(policy).toContain('dynamodb:UpdateItem');
+    expect(policy).not.toContain('secretsmanager');
+    expect(policy).not.toContain('sqs:SendMessage');
+  });
+
+  it('keeps the CSV bucket private, encrypted and HTTPS-only', () => {
+    template.hasResourceProperties('AWS::S3::Bucket', {
+      PublicAccessBlockConfiguration: {
+        BlockPublicAcls: true,
+        BlockPublicPolicy: true,
+        IgnorePublicAcls: true,
+        RestrictPublicBuckets: true,
+      },
+      BucketEncryption: { ServerSideEncryptionConfiguration: [{ ServerSideEncryptionByDefault: { SSEAlgorithm: 'AES256' } }] },
+    });
+    const bucketPolicy = JSON.stringify(template.findResources('AWS::S3::BucketPolicy'));
+    expect(bucketPolicy).toContain('aws:SecureTransport');
+  });
+
+  it('refuses uploads outside incoming/ for everyone but the CSV Lambda', () => {
+    const policies = Object.values(template.findResources('AWS::S3::BucketPolicy'));
+    const statements = policies.flatMap((p) => p.Properties.PolicyDocument.Statement as Array<Record<string, unknown>>);
+    const deny = statements.find((s) => s.Sid === 'UploadsOnlyToIncoming')!;
+    expect(deny).toMatchObject({ Effect: 'Deny', Action: 's3:PutObject', Principal: { AWS: '*' } });
+    expect(JSON.stringify(deny.NotResource)).toContain('/incoming/*');
+    expect(JSON.stringify(deny.Condition)).toContain('CsvImport');
+  });
+
+  it('calls the CSV Lambda for .csv files under incoming/ only', () => {
+    template.hasResourceProperties('Custom::S3BucketNotifications', {
+      NotificationConfiguration: {
+        LambdaFunctionConfigurations: [
+          Match.objectLike({
+            Events: ['s3:ObjectCreated:*'],
+            Filter: {
+              Key: {
+                // arrayWith is order-sensitive; CDK writes the suffix rule first.
+                FilterRules: Match.arrayWith([
+                  { Name: 'suffix', Value: '.csv' },
+                  { Name: 'prefix', Value: 'incoming/' },
+                ]),
+              },
+            },
+          }),
+        ],
+      },
+    });
+  });
+
+  it('lets the CSV Lambda read incoming/, write processed/ and rejected/, and send to the queue', () => {
+    const policy = policyOf('CsvImport');
+    expect(policy).toContain('/incoming/*');
+    expect(policy).toContain('/processed/*');
+    expect(policy).toContain('/rejected/*');
+    expect(policy).toContain('sqs:SendMessage');
+    expect(policy).not.toContain('sqs:ReceiveMessage');
+    expect(policy).not.toContain('secretsmanager');
+  });
+
   it('keeps logs for 7 days', () => {
     template.hasResourceProperties('AWS::Logs::LogGroup', { RetentionInDays: 7 });
   });

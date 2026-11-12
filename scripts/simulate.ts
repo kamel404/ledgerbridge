@@ -10,6 +10,11 @@
 //   npm run simulate -- bad-signature     wrong secret, old timestamp -> 401, nothing logged
 //   npm run simulate -- bad-payload       schema failure, broken JSON, wrong route -> 400 REJECTED
 //   npm run simulate -- unknown-category  a bill with an unmapped category -> FAILED, not retried
+//   npm run simulate -- dead --aws        a payment whose invoice never comes: 4 failed tries,
+//                                         dead-letter queue, status DEAD (takes ~4 minutes)
+//   npm run simulate -- csv --aws         uploads a vendor-bill CSV with some bad rows to the
+//                                         import bucket; checks the bills, the errors file,
+//                                         then uploads it again (nothing new may appear)
 //
 // Options:
 //   --aws          send to the deployed AWS API instead of localhost. The URLs
@@ -29,8 +34,10 @@
 //
 // Runs with plain `node` (Node 22.18+ strips the TypeScript types itself).
 
-import { createHmac } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { createHash, createHmac } from 'node:crypto';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { aws, loginHint } from './aws-cli.ts';
 
@@ -46,7 +53,7 @@ else if (ON_AWS) {
 }
 
 /** URLs and names of the deployed stacks, from `cdk deploy --outputs-file`. */
-function awsOutputs(): { apiUrl: string; erpUrl: string; tableName: string } {
+function awsOutputs(): { apiUrl: string; erpUrl: string; tableName: string; csvBucket: string } {
   const file = repoFile('infra/cdk-outputs.json');
   if (!existsSync(file)) {
     console.error('infra/cdk-outputs.json is missing. Run `npm run deploy` first.');
@@ -54,7 +61,12 @@ function awsOutputs(): { apiUrl: string; erpUrl: string; tableName: string } {
   }
   const outputs = JSON.parse(readFileSync(file, 'utf8')) as Record<string, Record<string, string>>;
   const lb = outputs.LedgerBridgeStack ?? {};
-  return { apiUrl: lb.ApiUrl ?? '', erpUrl: outputs.MockErpStack?.MockErpUrl ?? '', tableName: lb.SyncLogTableName ?? '' };
+  return {
+    apiUrl: lb.ApiUrl ?? '',
+    erpUrl: outputs.MockErpStack?.MockErpUrl ?? '',
+    tableName: lb.SyncLogTableName ?? '',
+    csvBucket: lb.CsvBucketName ?? '',
+  };
 }
 
 const env = process.env;
@@ -592,6 +604,137 @@ async function unknownCategory(): Promise<boolean> {
   return check(!vendor, 'nothing written to the ERP', vendor ? 'vendor was created!' : 'no vendor, no bill') && ok;
 }
 
+/**
+ * A payment for an invoice that never arrives: retryable every time, so after
+ * 4 receives (retry delays 10 s, 30 s, 90 s, 90 s) SQS moves it to the DLQ and
+ * the DLQ Lambda marks it DEAD.
+ */
+async function dead(): Promise<boolean> {
+  if (!ON_AWS) {
+    console.error('Needs the queue and the DLQ, so use --aws.');
+    return false;
+  }
+  const inv = makeInvoice(0); // never sent
+  const payment = makePayment(inv, 0);
+  const id = String(payment.id);
+  console.log(`Sending payment ${String((payment.data as Json).paymentId)} for invoice ${inv.invoiceId}, which never comes`);
+  const reply = await send('billing', payment);
+  let ok = check(reply.status === 202, 'accepted', String(reply.status));
+  console.log('  it is retried after 10 s, 30 s, 90 s and 90 s, then moves to the DLQ (about 4 minutes)');
+  const state = (await settle([id], new Map(), 8 * 60_000)).get(id);
+  ok = check(state?.status === 'DEAD' && state.attempts === 4, 'marked DEAD', describeState(state)) && ok;
+  return ok;
+}
+
+// ---------------------------------------------------------------------------
+// CSV import (AWS only: the import is triggered by S3)
+// ---------------------------------------------------------------------------
+
+/** True once the S3 object exists. */
+function s3Exists(key: string): boolean {
+  try {
+    aws(['s3api', 'head-object', '--bucket', deployed!.csvBucket, '--key', key]);
+    return true;
+  } catch (err) {
+    if (/Not Found|404/.test(String((err as { stderr?: string }).stderr))) return false;
+    throw err;
+  }
+}
+
+/** Uploads text to incoming/<name> and waits until the CSV Lambda has moved it away. */
+async function uploadCsv(name: string, text: string, timeoutMs = 90_000): Promise<boolean> {
+  const dir = mkdtempSync(path.join(tmpdir(), 'lb-csv-'));
+  try {
+    const file = path.join(dir, name);
+    writeFileSync(file, text);
+    aws(['s3', 'cp', file, `s3://${deployed!.csvBucket}/incoming/${name}`, '--only-show-errors']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await sleep(2000);
+    if (!s3Exists(`incoming/${name}`)) return true;
+  }
+  return false;
+}
+
+function s3Text(key: string): string | undefined {
+  if (!s3Exists(key)) return undefined;
+  return aws(['s3', 'cp', `s3://${deployed!.csvBucket}/${key}`, '-']);
+}
+
+/**
+ * Upload a CSV of vendor bills with some invalid rows (SPEC §12 `csv`):
+ *   3 valid bills (one of them with 2 lines), and 5 bad rows: bad date,
+ *   missing amount, unknown category, and a bill with one good + one bad row
+ *   (rejected as a whole, so it can't arrive with the wrong total).
+ */
+async function csv(): Promise<boolean> {
+  if (!ON_AWS) {
+    console.error('The CSV import is triggered by S3, so this needs --aws.');
+    console.error('(Locally, the import logic is covered by: npm test -w integration-service)');
+    return false;
+  }
+  if (!deployed!.csvBucket) {
+    console.error('No CsvBucketName in infra/cdk-outputs.json. Run `npm run deploy` first.');
+    return false;
+  }
+  const b = (n: number) => `BILL-${RUN}-C${n}`;
+  const v = (n: number) => `VEN-${RUN}-C${n}`;
+  const text = [
+    'bill_number,vendor_id,vendor_name,bill_date,due_date,currency,expense_category,description,amount',
+    `${b(1)},${v(1)},Beirut Office Supplies,${today},${inDays(30)},USD,OFFICE_SUPPLIES,Printer paper,24.50`,
+    `${b(1)},${v(1)},Beirut Office Supplies,${today},${inDays(30)},USD,SOFTWARE,"Licences, annual",1200`,
+    `${b(2)},${v(2)},Mount Lebanon Telecom,${today},,USD,UTILITIES,Fibre line,89.99`,
+    `${b(3)},${v(3)},Phoenicia Travel,${today},${inDays(15)},EUR,TRAVEL,Flights to Paris,640`,
+    `${b(4)},${v(4)},Litani Power & Water,2026-13-45,,USD,UTILITIES,Electricity,310`,
+    `${b(5)},${v(5)},Corniche Legal Partners,${today},,USD,PROFESSIONAL_SERVICES,Contract review,`,
+    `${b(6)},${v(6)},Marina Yachts,${today},,USD,YACHTS,Team offsite,9000`,
+    `${b(7)},${v(7)},Cedar Cleaning,${today},,USD,OFFICE_SUPPLIES,Cleaning products,45`,
+    `${b(7)},${v(7)},Cedar Cleaning,${today},,USD,OFFICE_SUPPLIES,Refund,-20`,
+    '',
+  ].join('\n');
+  const hash = createHash('sha256').update(text).digest('hex');
+  const name = `bills-${RUN}.csv`;
+  const validBills = [b(1), b(2), b(3)];
+  const invalidBills = [b(4), b(5), b(6), b(7)];
+  const ids = validBills.map((n) => `csv:${hash}:${n}`);
+
+  console.log(`Uploading ${name} (8 data rows: 3 good bills, 5 bad rows) to s3://${deployed!.csvBucket}/incoming/`);
+  let ok = check(await uploadCsv(name, text), 'file picked up', `moved out of incoming/`);
+  ok = check(s3Exists(`processed/${name}`), 'file in processed/', `processed/${name}`) && ok;
+
+  const errors = s3Text(`rejected/bills-${RUN}.errors.csv`);
+  const errorLines = (errors ?? '').split(/\r?\n/).filter(Boolean).slice(1);
+  ok = check(errorLines.length === 5, 'errors file', `rejected/bills-${RUN}.errors.csv with ${errorLines.length} row(s)`) && ok;
+  for (const line of errorLines) console.log(`         ${line}`);
+
+  const states = await settle(ids, new Map());
+  ok = reportGroup('bills', ids, states) && ok;
+
+  const token = await erpToken();
+  const created = await Promise.all(validBills.map((n) => erpCount(token, 'vendorBill', n)));
+  ok = check(created.every((c) => c === 1), 'valid bills in the ERP', created.join(', ')) && ok;
+  const twoLines = await erpGet(token, 'vendorBill', b(1));
+  const lines = (twoLines?.expense as { items?: unknown[] } | undefined)?.items?.length;
+  ok = check(lines === 2, `${b(1)} has both lines`, `${String(lines)} line(s), total ${String(twoLines?.total)}`) && ok;
+  const leaked = await Promise.all(invalidBills.map((n) => erpCount(token, 'vendorBill', n)));
+  ok = check(leaked.every((c) => c === 0), 'invalid bills not in the ERP', leaked.join(', ')) && ok;
+
+  console.log('Uploading the same file again');
+  ok = check(await uploadCsv(name, text), 'file picked up again') && ok;
+  await sleep(5000); // give any (wrongly) queued event time to be processed
+  const again = readSyncLog(ids);
+  ok = check(
+    ids.every((id) => again.get(id)?.status === 'SUCCEEDED' && again.get(id)?.attempts === 1),
+    'sync records unchanged',
+    ids.map((id) => describeState(again.get(id))).join(' | '),
+  ) && ok;
+  const afterCounts = await Promise.all(validBills.map((n) => erpCount(token, 'vendorBill', n)));
+  return check(afterCounts.every((c) => c === 1), 'still one record per bill in the ERP', afterCounts.join(', ')) && ok;
+}
+
 const COMMANDS: Record<string, () => Promise<boolean>> = {
   happy,
   one,
@@ -600,6 +743,8 @@ const COMMANDS: Record<string, () => Promise<boolean>> = {
   'bad-signature': badSignature,
   'bad-payload': badPayload,
   'unknown-category': unknownCategory,
+  dead,
+  csv,
 };
 
 const command = args.find((a, i) => !a.startsWith('--') && args[i - 1] !== '--delay');

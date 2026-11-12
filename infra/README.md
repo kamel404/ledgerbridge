@@ -11,18 +11,21 @@ A *stack* is a group of resources deployed and deleted together.
 | Stack | What's in it |
 |---|---|
 | `MockErpStack` | The fake NetSuite: a DynamoDB table, one Lambda running the Nest app, a public HTTPS URL (API Gateway) |
-| `LedgerBridgeStack` | The product: webhook URL (API Gateway) → ingest Lambda → `SyncLog` table + `SyncQueue` (SQS) with a dead-letter queue → worker Lambda → ERP |
+| `LedgerBridgeStack` | The product: webhook URL (API Gateway) → ingest Lambda, and CSV bucket (S3) → CSV Lambda, both → `SyncLog` table + `SyncQueue` (SQS) → worker Lambda → ERP. Dead-letter queue → DLQ Lambda (marks `DEAD`) |
 
 Both are in Region **eu-north-1**, the only Region our AWS project allows.
 
 ```
                         LedgerBridgeStack
- source app ──HTTPS──▶ API Gateway ──▶ Ingest Lambda ──▶ SyncLog (DynamoDB)   RECEIVED / REJECTED, dedup
-  (signed webhook)     20 req/s max          │
-                                             └──────────▶ SyncQueue (SQS) ──▶ Worker Lambda ──▶ SyncLog
+ source app ──HTTPS──▶ API Gateway ──▶ Ingest Lambda ──┐
+  (signed webhook)     20 req/s max                      ├──▶ SyncLog (DynamoDB)   RECEIVED / REJECTED, dedup
+ finance ──upload──▶ S3 incoming/*.csv ──▶ CSV Lambda ───┤
+                     (moved to processed/,               │
+                      bad rows in rejected/)             └──▶ SyncQueue (SQS) ──▶ Worker Lambda ──▶ SyncLog
                                                                │          batches of 5,     SUCCEEDED / RETRYING / FAILED
                                                                │          max 5 at once          │
-                                                               └─ after 4 failures ─▶ SyncDLQ    │ HTTPS + OAuth
+                                                               └─ after 4 failures ─▶ SyncDLQ ──▶ DLQ Lambda: DEAD
+                                                                                                 │ HTTPS + OAuth
                         MockErpStack                                                             ▼
                        API Gateway ──▶ Mock ERP Lambda ──▶ Records (DynamoDB)  ◀──────────────────┘
 ```
@@ -48,6 +51,10 @@ If AWS says your credentials expired: `aws login --profile ledgerbridge` (they l
 - **Permissions**: every Lambda has its own IAM role, and only `grant*()` calls add permissions. Anything else fails with `AccessDenied`.
   - Ingest: write the SyncLog table, *send* to the queue (not receive or delete), read `ledgerbridge/webhooks`.
   - Worker: receive/delete/change visibility on the queue (added by the event source), read and write the SyncLog table, read `ledgerbridge/erp`. It can't send to the queue or read the webhook secrets.
+  - CSV import: read and delete in `incoming/`, write to `processed/` and `rejected/`, write the SyncLog table, send to the queue.
+  - DLQ handler: consume the DLQ, read and write the SyncLog table. Nothing else.
+- **CSV bucket**: Block Public Access, S3-managed encryption, HTTPS only, ACLs off. A bucket policy refuses uploads anywhere but `incoming/` (except from the CSV Lambda). Files expire after 90 days (`incoming/` after 30). `.csv` files created under `incoming/` trigger the CSV Lambda. `cdk destroy` empties and deletes it (CDK adds a small helper Lambda for that, and one that wires up the notification).
+- **DLQ handler**: the trigger removes each message from the DLQ once its record is `DEAD`; the record keeps the event for replay. So alarms watch messages *arriving* in the DLQ (Phase 6), not messages waiting there.
 - **Worker trigger**: an SQS event source with batch size 5, `ReportBatchItemFailures` (only failed messages return to the queue) and `maxConcurrency: 5` (at most 5 worker copies at once, so a burst can't flood the ERP). Worker timeout 30 s; the queue's visibility timeout is 6× that (180 s).
 - **ERP URL**: the worker gets the mock ERP's URL from `MockErpStack` (a cross-stack reference). Pointing at a real NetSuite later means passing its URL instead.
 - **Secrets**: LedgerBridge's secrets live in Secrets Manager (`ledgerbridge/webhooks` for ingest, `ledgerbridge/erp` for the worker). Each Lambda gets only the secret's name. The mock ERP's own client secret is a Lambda environment variable, acceptable only because it's the fake ERP.

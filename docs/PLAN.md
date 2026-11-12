@@ -424,17 +424,17 @@ Automated, no AWS needed: `npm run test:e2e -w integration-service` runs the sam
 - **Bucket safety settings:** *Block Public Access* (nothing in this bucket can ever be made public), *encryption at rest* (files are encrypted on disk), and an IAM policy so uploads are allowed only under `incoming/`.
 - **Moving a file** in S3 = copy to the new key + delete the old one. There's no rename.
 - **Deterministic event IDs:** the ID is `csv:<sha256 of file>:<bill_number>`. Upload the same file again → same IDs → the dedup from Phase 3 ignores them. Same input, same IDs: that's what makes re-uploads safe.
-- **DLQ consumer:** a tiny Lambda triggered by the DLQ. Its only job: set the sync record to `DEAD` so the dashboard shows it. The message stays in the DLQ (that's what the alarm watches) until replayed.
+- **DLQ consumer:** a tiny Lambda triggered by the DLQ. Its only job: set the sync record to `DEAD` so the dashboard shows it. *Built differently from first planned:* a Lambda trigger deletes each message once handled, so the DLQ empties itself. Nothing is lost (the sync record keeps the whole event for replay), but the Phase 6 alarm watches messages *arriving* in the DLQ instead of messages sitting in it.
 
 ### Tasks
 
-- [ ] S3 bucket: block public access, encryption, `enforceSSL`, notification on `incoming/` prefix → CSV Lambda
-- [ ] `lambda/csv.ts`: download, hash, parse rows, validate each row, group by `bill_number`, build one `bill.approved` per bill, write `RECEIVED` + enqueue (same path as ingest)
-- [ ] Invalid rows → `rejected/<file>.errors.csv` (original columns + `reason`)
-- [ ] Move the file to `processed/`
-- [ ] DLQ Lambda: on each message, set status `DEAD`
-- [ ] Simulator `csv`: upload a sample with a few invalid rows (bad date, missing amount, unknown category)
-- [ ] Unit tests: CSV row parsing and grouping, deterministic IDs
+- [x] S3 bucket: block public access, encryption, `enforceSSL`, notification on `incoming/` prefix → CSV Lambda (plus: uploads allowed only under `incoming/`, files expire after 90 days)
+- [x] `lambda/csv.ts`: download, hash, parse rows, validate each row, group by `bill_number`, build one `bill.approved` per bill, write `RECEIVED` + enqueue (same path as ingest)
+- [x] Invalid rows → `rejected/<file>.errors.csv` (original columns + `reason`)
+- [x] Move the file to `processed/`
+- [x] DLQ Lambda: on each message, set status `DEAD`
+- [x] Simulator `csv`: upload a sample with a few invalid rows (bad date, missing amount, unknown category). Also `dead`: an event that ends `DEAD`
+- [x] Unit tests: CSV row parsing and grouping, deterministic IDs
 
 ### Done when
 
@@ -443,6 +443,28 @@ Automated, no AWS needed: `npm run test:e2e -w integration-service` runs the sam
 ### How to check
 
 Console → S3 → bucket: the file is in `processed/`, an `.errors.csv` is in `rejected/`. Mock ERP has the valid bills. Upload the same file again: nothing new is created.
+
+1. `npm run deploy` (the bucket name lands in `infra/cdk-outputs.json` as `CsvBucketName`).
+2. `npm run simulate -- csv --aws`: uploads a generated file (3 good bills, 5 bad rows), checks `processed/`, the errors file, the sync log and the ERP, then uploads it again and checks nothing changed. Exit code 0 = pass.
+3. `npm run simulate -- dead --aws`: a payment whose invoice never comes. After about 4 minutes it's `DEAD` with `attempts` 4.
+4. By hand: Console → S3 → the `ledgerbridgestack-csvimports…` bucket → create folder `incoming` if missing → **Upload** `scripts/samples/vendor-bills.csv` into it. Refresh after a few seconds: the file is in `processed/`, `rejected/vendor-bills.errors.csv` lists 2 bad rows. Upload it again: nothing new in the ERP.
+
+Automated, no AWS: `npm test -w integration-service` (CSV reader, bill rules, file moves, re-import, DLQ handler) and `npm test -w infra` (bucket safety, permissions, triggers).
+
+### Decisions made while building it
+
+- **The DLQ empties itself** (see Concepts). The alternative was marking `DEAD` inside the worker on its last attempt and leaving messages in the DLQ, but then a replay would also have to find and delete the DLQ copy. With the sync record as the one place a dead event lives, Phase 7's replay just re-sends from it.
+- **The DLQ Lambda never overwrites a final status.** If another copy of the same event succeeded meanwhile, the record stays `SUCCEEDED`.
+- **A bill with one bad row is rejected as a whole**, with a reason on each of its rows. Importing only its good rows would create a bill with the wrong total.
+- **Rows of one bill must agree** on vendor, dates and currency; otherwise the bill is rejected.
+- **Unknown categories and currencies are caught in the CSV**, using the same lookup tables as the worker. Finance sees them in the errors file at once, not as `FAILED` syncs later. (A webhook with an unknown category still ends `FAILED`, as in Phase 4.)
+- **Files that can't be used at all** (missing columns, not UTF-8, broken quotes, over 10 MB or 10,000 rows) go to `rejected/<file>.csv` with a one-line `rejected/<file>.errors.csv`, and nothing is queued.
+- **The errors file is safe to open in Excel**: cells starting with `=`, `+`, `@` are prefixed with `'` so they can't run as formulas.
+- **Columns can be in any order and extra columns are ignored**, so a file exported from another tool works as long as the 9 names are there.
+- **Shared intake for webhooks and CSV** (`src/intake/`): dedup, `RECEIVED`, dispatch. Fix found on the way: if a Lambda crashed between writing `RECEIVED` and sending to SQS, the event was stuck forever, because every retry was answered "duplicate". Now a duplicate that finds its record still `RECEIVED` after 2 minutes re-sends the stored event (harmless if it was queued after all: the worker skips `SUCCEEDED` events and writes are upserts).
+- **The file is moved last.** If the CSV Lambda dies halfway, S3 calls it again (up to 2 retries); bills already queued come back as duplicates.
+- **Uploads only under `incoming/`** via a bucket policy that denies `PutObject` elsewhere to everyone except the CSV Lambda's role, admins included.
+- **The CSV Lambda doesn't call the ERP**: it only queues, like ingest. The worker does the rest, so a CSV bill and a webhook bill take exactly the same path from the queue on.
 
 ---
 
@@ -463,7 +485,7 @@ Console → S3 → bucket: the file is in `processed/`, an `.errors.csv` is in `
   ```
 - **Powertools for AWS Lambda:** an AWS library that does structured logging and metrics properly. `Logger` adds context fields (`eventId`, `flow`, …) to every line; `Metrics` publishes custom metrics cheaply (as specially formatted log lines, the "Embedded Metric Format").
 - **Metrics:** numbers over time, e.g. `SyncFailed` with dimension `flow=O2C`. A **dimension** is a label you can filter or split by.
-- **Alarms:** a rule like "if `DLQ ApproximateNumberOfMessagesVisible` > 0 for 1 period of 1 minute → ALARM". On state change it sends to an SNS topic.
+- **Alarms:** a rule like "if `DLQ NumberOfMessagesReceived` > 0 in 1 minute → ALARM". On state change it sends to an SNS topic. (Not "messages visible in the DLQ": since Phase 5 the DLQ Lambda empties it within seconds, so the number of messages *waiting* there stays 0. *Received* counts every dead message as it arrives.)
 - **SNS email subscription:** after deploy, AWS emails you a **confirmation link**. Nothing arrives until you click it (and check spam).
 - **Redaction:** logs must never contain secrets, tokens, or full emails. Mask emails (`a***@cedar.example`) before logging and never log headers wholesale.
 
@@ -473,8 +495,8 @@ Console → S3 → bucket: the file is in `processed/`, an `.errors.csv` is in `
 - [ ] Redaction helper for emails; never log `Authorization` or signature headers
 - [ ] Powertools `Metrics`: `SyncSucceeded`, `SyncFailed`, `SyncRetried`, `SyncDurationMs` (dimension `flow`), namespace `LedgerBridge`
 - [ ] SNS topic + email subscription (address from CDK context/config, not hard-coded)
-- [ ] Alarms: DLQ visible > 0; `SyncFailed` ≥ 5 in 5 min; worker errors > 0 for 2 periods; oldest message age > 10 min; (`ReconciliationMismatches` > 0 is added in Phase 8)
-- [ ] CloudWatch dashboard: queue depth, success vs failure, duration p50/p95, DLQ depth
+- [ ] Alarms: DLQ messages received > 0 (see Concepts); `SyncFailed` ≥ 5 in 5 min; worker errors > 0 for 2 periods; oldest message age > 10 min; (`ReconciliationMismatches` > 0 is added in Phase 8)
+- [ ] CloudWatch dashboard: queue depth, success vs failure, duration p50/p95, dead events
 - [ ] Chaos switch on the deployed mock (env var via CDK context, or an admin endpoint)
 
 ### Done when

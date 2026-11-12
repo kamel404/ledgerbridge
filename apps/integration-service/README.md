@@ -13,7 +13,7 @@ Run from the repo root (`-w integration-service` targets this app) or from this 
 | `npm run test:e2e -w integration-service` | HTTP tests against the full app plus an in-process mock ERP (`test/*.e2e-spec.ts`) |
 | `npm run typecheck -w integration-service` | TypeScript check, no output |
 | `npm run build:lambda -w integration-service` | Lambda bundle in `dist-lambda/` |
-| `npm run simulate -- <command> [--aws]` (root) | Fake source apps: `happy`, `duplicates`, `out-of-order`, `bad-signature`, `bad-payload`, `unknown-category`. Header of `scripts/simulate.ts` explains each |
+| `npm run simulate -- <command> [--aws]` (root) | Fake source apps: `happy`, `duplicates`, `out-of-order`, `bad-signature`, `bad-payload`, `unknown-category`, `dead`, `csv`. Header of `scripts/simulate.ts` explains each |
 
 ## How an event flows
 
@@ -53,14 +53,17 @@ SqsBatchHandler (AWS)      SUCCEEDED / FAILED → message deleted
 
 | Folder | Contents |
 |---|---|
-| `src/ingest/` | Webhook controller, signature guard + `signature.ts` (HMAC, timestamp), raw-body setup, `EventDispatcher` |
+| `src/ingest/` | Webhook controller, signature guard + `signature.ts` (HMAC, timestamp), raw-body setup, `EventDispatcher`, `SqsDispatcher` |
+| `src/intake/` | `EventIntakeService`: dedup + `RECEIVED` + dispatch, shared by webhooks and CSV; `IntakeModule` picks SQS or inline |
+| `src/csv/` | CSV reader/writer, vendor-bill rules (`bill-csv.ts`: validate, group, deterministic IDs, errors file), `CsvImportService`, `CsvFileHandler` (S3 moves) |
+| `src/dlq/` | `DeadLetterHandler`: marks events that reach the DLQ `DEAD` |
 | `src/flows/` | `FlowHandler` interface, `FlowRegistry`, `o2c/` (invoice, payment), `p2p/` (bill). Mappers are pure functions |
 | `src/erp-client/` | `ErpClient` and `erp-errors.ts` (HTTP status → retryable/permanent) |
 | `src/errors/` | `RetryableError`, `PermanentError`, `classifyError` |
 | `src/lookups/` | SKU → item, expense category → account, currency → currency ID |
 | `src/sync-log/` | `SyncRecord`, repository interface, in-memory and DynamoDB repositories, `SyncLogService` |
 | `src/worker/` | `SyncWorker` (one event in, status out), `SqsBatchHandler` (SQS batch → worker, retry delays), `WorkerAppModule` (the worker Lambda's root module) |
-| `src/lambda/` | Lambda entry points: `http.ts` (API Gateway → Nest app), `worker.ts` (SQS → `SqsBatchHandler`) |
+| `src/lambda/` | Lambda entry points: `http.ts` (API Gateway → Nest app), `worker.ts` (SQS → `SqsBatchHandler`), `csv.ts` (S3 → `CsvFileHandler`), `dlq.ts` (DLQ → `DeadLetterHandler`) |
 | `src/secrets/` | `SecretsProvider` interface, env-var version (local) and Secrets Manager version (AWS) |
 | `src/config/` | Non-secret settings from env vars (`ERP_BASE_URL`, timeouts) |
 
@@ -90,8 +93,18 @@ curl -s -X POST localhost:3000/webhooks/procurement \
 - `src/app.factory.ts` builds the Nest app. Both `src/main.ts` (local server) and `src/lambda/http.ts` (Lambda) use it, so they behave the same, including the raw-body setup for webhooks.
 - `src/lambda/http.ts` wraps the app with `@codegenie/serverless-express` and caches it between invocations (cold start once, then warm).
 - `npm run build:lambda` bundles with **rspack**, not webpack: Nest 12's webpack builder refuses ESM projects. rspack keeps the decorator metadata that dependency injection needs. Settings and reasons are in `rspack.config.cjs`.
-- Output: `dist-lambda/http.js` and `dist-lambda/worker.js`, one file per Lambda with every dependency inside, plus a `package.json` marking them CommonJS. Lambda handlers: `http.handler`, `worker.handler`.
-- `src/lambda/worker.ts` starts Nest with `createApplicationContext` (dependency injection, no HTTP server) and caches it like the HTTP one.
+- Output: `dist-lambda/{http,worker,csv,dlq}.js`, one file per Lambda with every dependency inside, plus a `package.json` marking them CommonJS. Lambda handlers: `http.handler`, `worker.handler`, `csv.handler`, `dlq.handler`.
+- The non-HTTP Lambdas (`worker.ts`, `csv.ts`, `dlq.ts`) start Nest with `createApplicationContext` (dependency injection, no HTTP server) and cache it like the HTTP one.
+
+## CSV import
+
+Upload a file with these columns (any order, extra columns ignored) to `s3://<CsvBucketName>/incoming/`:
+
+```
+bill_number,vendor_id,vendor_name,bill_date,due_date,currency,expense_category,description,amount
+```
+
+Rows sharing a `bill_number` become one bill. Each bill becomes a `bill.approved` event with ID `csv:<sha256 of the file>:<bill_number>`, so uploading the same file twice changes nothing. Bad rows (and every row of a bill that has one) go to `rejected/<file>.errors.csv` with a `reason`. The file moves to `processed/`. Example: [`scripts/samples/vendor-bills.csv`](../../scripts/samples/vendor-bills.csv).
 
 Try the bundle locally without AWS (from the repo root, Git Bash):
 

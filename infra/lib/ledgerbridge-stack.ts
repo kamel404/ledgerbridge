@@ -2,7 +2,10 @@ import cdk from 'aws-cdk-lib';
 import apigw from 'aws-cdk-lib/aws-apigatewayv2';
 import integrations from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import dynamodb from 'aws-cdk-lib/aws-dynamodb';
+import iam from 'aws-cdk-lib/aws-iam';
 import { SqsEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
+import s3 from 'aws-cdk-lib/aws-s3';
+import s3n from 'aws-cdk-lib/aws-s3-notifications';
 import secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import sqs from 'aws-cdk-lib/aws-sqs';
 import type { Construct } from 'constructs';
@@ -23,9 +26,10 @@ export const WORKER_TIMEOUT = cdk.Duration.seconds(30);
 /**
  * The product (SPEC §4, §8): webhook in -> sync log -> queue -> worker -> ERP.
  *
- *   API Gateway --> ingest Lambda --> SyncLog table (RECEIVED, dedup)
- *                                 \-> SQS SyncQueue --> worker Lambda --> ERP
- *                                       \-> after 4 failed receives: SyncDLQ
+ *   API Gateway --> ingest Lambda --\
+ *   S3 incoming/*.csv --> CSV Lambda --> SyncLog table (RECEIVED, dedup)
+ *                                    \-> SQS SyncQueue --> worker Lambda --> ERP
+ *                                          \-> after 4 failed receives: SyncDLQ --> DLQ Lambda (DEAD)
  */
 export class LedgerBridgeStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: LedgerBridgeStackProps) {
@@ -116,6 +120,85 @@ export class LedgerBridgeStack extends cdk.Stack {
     syncLog.grantReadWriteData(worker);
     erpSecret.grantRead(worker);
 
+    // ---- Dead-letter handler (SPEC §8.2) -----------------------------------------
+    // Marks each event that lands in the DLQ as DEAD. The trigger removes the
+    // message from the DLQ afterwards; the sync record keeps the event for replay.
+    const dlqHandler = new NestFunction(this, 'DlqHandler', {
+      app: 'integration-service',
+      entry: 'dlq',
+      description: 'LedgerBridge: marks events in the dead-letter queue DEAD',
+      timeout: cdk.Duration.seconds(30),
+      memorySize: 256,
+      environment: { SYNC_LOG_TABLE: syncLog.tableName },
+    });
+    dlqHandler.addEventSource(new SqsEventSource(dlq, { batchSize: 10, reportBatchItemFailures: true }));
+    syncLog.grantReadWriteData(dlqHandler);
+
+    // ---- CSV import (SPEC §6.2) --------------------------------------------------
+    //   incoming/  finance uploads here (the only place uploads are allowed)
+    //   processed/ the CSV Lambda moves each file here when it's done
+    //   rejected/  <file>.errors.csv with the bad rows, and files refused as a whole
+    const csvBucket = new s3.Bucket(this, 'CsvImports', {
+      // Nothing in this bucket can ever be made public.
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      // Files are encrypted on disk with keys S3 manages (free).
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      // Refuse plain-HTTP requests.
+      enforceSSL: true,
+      // Only IAM decides access; ACLs (an old per-object permission system) are off.
+      objectOwnership: s3.ObjectOwnership.BUCKET_OWNER_ENFORCED,
+      // Old files cost storage forever otherwise.
+      lifecycleRules: [
+        { prefix: 'processed/', expiration: cdk.Duration.days(90) },
+        { prefix: 'rejected/', expiration: cdk.Duration.days(90) },
+        // A file nobody processed (e.g. not .csv) shouldn't linger either.
+        { prefix: 'incoming/', expiration: cdk.Duration.days(30) },
+      ],
+      // Learning project: `cdk destroy` empties and deletes the bucket.
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: true,
+    });
+
+    const csvImport = new NestFunction(this, 'CsvImport', {
+      app: 'integration-service',
+      entry: 'csv',
+      description: 'LedgerBridge CSV import: incoming/*.csv -> bill events on the queue',
+      timeout: cdk.Duration.seconds(60),
+      environment: {
+        SYNC_LOG_TABLE: syncLog.tableName,
+        SYNC_QUEUE_URL: queue.queueUrl,
+      },
+    });
+    // Read and delete only in incoming/, write only to processed/ and rejected/.
+    csvBucket.grantRead(csvImport, 'incoming/*');
+    csvBucket.grantDelete(csvImport, 'incoming/*');
+    csvBucket.grantPut(csvImport, 'processed/*');
+    csvBucket.grantPut(csvImport, 'rejected/*');
+    // Same intake as webhooks: dedup + RECEIVED in the sync log, then the queue.
+    syncLog.grantReadWriteData(csvImport);
+    queue.grantSendMessages(csvImport);
+
+    // "When a .csv file is created under incoming/, call the CSV Lambda."
+    // The Lambda writes to other prefixes, so it never triggers itself.
+    csvBucket.addEventNotification(s3.EventType.OBJECT_CREATED, new s3n.LambdaDestination(csvImport), {
+      prefix: 'incoming/',
+      suffix: '.csv',
+    });
+
+    // Uploads only under incoming/ (SPEC §10). The bucket policy refuses a
+    // PutObject anywhere else from anyone except the CSV Lambda, even from an
+    // admin whose own IAM permissions would allow it.
+    csvBucket.addToResourcePolicy(
+      new iam.PolicyStatement({
+        sid: 'UploadsOnlyToIncoming',
+        effect: iam.Effect.DENY,
+        principals: [new iam.AnyPrincipal()],
+        actions: ['s3:PutObject'],
+        notResources: [csvBucket.arnForObjects('incoming/*')],
+        conditions: { ArnNotEquals: { 'aws:PrincipalArn': csvImport.role!.roleArn } },
+      }),
+    );
+
     // ---- Public HTTP API -------------------------------------------------------
     const api = new apigw.HttpApi(this, 'HttpApi', {
       description: 'LedgerBridge webhooks',
@@ -138,5 +221,9 @@ export class LedgerBridgeStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'SyncDlqUrl', { value: dlq.queueUrl });
     new cdk.CfnOutput(this, 'SyncLogTableName', { value: syncLog.tableName });
     new cdk.CfnOutput(this, 'WorkerFunctionName', { value: worker.functionName });
+    new cdk.CfnOutput(this, 'CsvBucketName', {
+      value: csvBucket.bucketName,
+      description: 'Upload vendor-bill CSVs to s3://<CsvBucketName>/incoming/',
+    });
   }
 }

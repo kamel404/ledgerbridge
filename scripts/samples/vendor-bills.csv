@@ -1,0 +1,6 @@
+bill_number,vendor_id,vendor_name,bill_date,due_date,currency,expense_category,description,amount
+BILL-SAMPLE-1,VEN-SAMPLE-1,Beirut Office Supplies,2026-11-10,2026-12-10,USD,OFFICE_SUPPLIES,Printer paper,24.50
+BILL-SAMPLE-1,VEN-SAMPLE-1,Beirut Office Supplies,2026-11-10,2026-12-10,USD,SOFTWARE,"Licences, annual",1200
+BILL-SAMPLE-2,VEN-SAMPLE-2,Mount Lebanon Telecom,2026-11-10,,USD,UTILITIES,Fibre line,89.99
+BILL-SAMPLE-3,VEN-SAMPLE-3,Litani Power & Water,2026-13-45,,USD,UTILITIES,Electricity,310
+BILL-SAMPLE-4,VEN-SAMPLE-4,Marina Yachts,2026-11-10,,USD,YACHTS,Team offsite,9000

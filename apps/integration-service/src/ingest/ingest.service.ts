@@ -1,9 +1,8 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { EVENT_FLOW, parseEvent, type Flow, type SyncStatus } from '@ledgerbridge/shared';
-import { businessKeyOf } from '../flows/flow-handler.js';
+import { EventIntakeService } from '../intake/event-intake.service.js';
 import type { WebhookSource } from '../secrets/secrets-provider.js';
 import { SyncLogService } from '../sync-log/sync-log.service.js';
-import { EVENT_DISPATCHER, type EventDispatcher } from './event-dispatcher.js';
 
 /** Which flow each webhook source feeds. Also the flow of a body we can't parse (PLAN gap 3). */
 const SOURCE_FLOW: Record<WebhookSource, Flow> = {
@@ -20,14 +19,14 @@ export type IngestResult =
  * What happens to a webhook once its signature checks out (SPEC §8.1):
  *
  *   not JSON / fails schema / wrong source -> REJECTED record, 400
- *   event ID seen before                   -> 200, nothing else
+ *   event ID seen before                   -> 200 (see EventIntakeService for the one exception)
  *   otherwise                              -> RECEIVED record, dispatch, 202 { syncId }
  */
 @Injectable()
 export class IngestService {
   constructor(
     private readonly syncLog: SyncLogService,
-    @Inject(EVENT_DISPATCHER) private readonly dispatcher: EventDispatcher,
+    private readonly intake: EventIntakeService,
   ) {}
 
   async ingest(source: WebhookSource, rawBody: Buffer): Promise<IngestResult> {
@@ -55,17 +54,10 @@ export class IngestService {
       );
     }
 
-    const isNew = await this.syncLog.received({
-      eventId: event.id,
-      source,
-      flow,
-      eventType: event.type,
-      businessKey: businessKeyOf(event),
-      payload: event,
-    });
-    if (!isNew) return { httpStatus: 200, body: { syncId: event.id, duplicate: true } };
+    if ((await this.intake.accept({ event, source, flow })) === 'duplicate') {
+      return { httpStatus: 200, body: { syncId: event.id, duplicate: true } };
+    }
 
-    await this.dispatcher.dispatch(event.id, event);
     // With the inline dispatcher the event is already processed; report where it ended.
     const record = await this.syncLog.get(event.id);
     return { httpStatus: 202, body: { syncId: event.id, ...(record && { status: record.status }) } };
