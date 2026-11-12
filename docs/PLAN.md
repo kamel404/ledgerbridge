@@ -548,18 +548,41 @@ Also worth a look:
 
 ### Tasks
 
-- [ ] `admin/` module + API key guard
-- [ ] `GET /admin/syncs?status=&flow=&q=&cursor=` (newest first; status via `byStatus` GSI)
-- [ ] `GET /admin/syncs/{eventId}` (full detail incl. payload, error, history)
-- [ ] `POST /admin/syncs/{eventId}/replay` (only `FAILED`/`DEAD`)
-- [ ] `GET /admin/stats` (counts per status and flow, last 24 h; DLQ depth via SQS `GetQueueAttributes`)
-- [ ] Add a `history[]` list of `{ status, at, error? }` to sync records (needed for the timeline)
-- [ ] `apps/dashboard` (Next.js App Router): Overview (tiles, refresh every 15 s), Syncs (table, filters, search, cursor), Sync detail (timeline, payload, error, ERP ID, Replay button)
-- [ ] Admin URL + key in the dashboard's `.env.local` (git-ignored), read only on the server
+- [x] `admin/` module + API key guard
+- [x] `GET /admin/syncs?status=&flow=&q=&cursor=` (newest first; status via `byStatus` GSI)
+- [x] `GET /admin/syncs/{eventId}` (full detail incl. payload, error, history)
+- [x] `POST /admin/syncs/{eventId}/replay` (only `FAILED`/`DEAD`)
+- [x] `GET /admin/stats` (counts per status and flow, last 24 h; DLQ depth via SQS `GetQueueAttributes`)
+- [x] Add a `history[]` list of `{ status, at, error? }` to sync records (needed for the timeline) *(there since Phase 2, as `{ status, at, note? }`)*
+- [x] `apps/dashboard` (Next.js App Router): Overview (tiles, refresh every 15 s), Syncs (table, filters, search, cursor), Sync detail (timeline, payload, error, ERP ID, Replay button)
+- [x] Admin URL + key in the dashboard's `.env.local` (git-ignored), read only on the server (`npm run dashboard:env` writes it)
 
 ### Done when
 
 You find the dead events on the dashboard, turn chaos off, click Replay, and they succeed.
+
+### How to check
+
+1. Once: `npm run aws:secrets` (adds `ledgerbridge/admin` and `ADMIN_API_KEY` in `.env.aws`), `npm run deploy`, `npm run dashboard:env`.
+2. `npm run dashboard` and open http://localhost:3002. The Phase 6 outage left 6 `DEAD` events; otherwise make some: `npm run chaos -- 1`, `npm run simulate -- outage --aws`.
+3. Chaos off: `npm run chaos -- 0`.
+4. Overview → **Dead** tile → click an event → **Replay**. Refresh after a few seconds: `SUCCEEDED`, the timeline ends DEAD → RECEIVED (replayed) → PROCESSING → SUCCEEDED, and the error box is gone.
+
+Automated, no AWS: `npm run test:e2e -w integration-service` (`test/admin.e2e-spec.ts` runs this exact story through the admin API) and `npm test -w dashboard`.
+
+### Decisions made while building it
+
+- **A separate admin Lambda**, same code bundle as ingest. Only `/admin/*` reaches it, and only its role can read `ledgerbridge/admin`, send to the queue (replay) and read queue depths. The webhook Lambda gained nothing. Without the key the admin routes answer `503` (closed, not open).
+- **The key check** hashes the given and expected key and compares with `timingSafeEqual`, like the webhook signatures.
+- **"All statuses, newest first" without a new index**: the list reads the newest matches of each status from `byStatus` and merges them; the cursor remembers where each status's list stopped. An index with every record under one key would put all writes on one partition, the classic DynamoDB anti-pattern. The in-memory store uses the same merge, so local and AWS page identically. The cursor is checked on the way in; a tampered one is a `400`.
+- **Search** matches part of the business key in any case (`inv-1042` finds `INV-1042`), or an exact event ID.
+- **Replay is a conditional write**: the record changes to `RECEIVED` only if it is still `FAILED`/`DEAD`, so a double click can't queue it twice (the second gets `409`). It resets `attempts` to 0, clears the error, and sends the stored event straight to the queue (gap 1). If sending fails, the record goes back to its old status. There's no DLQ copy to purge: the DLQ handler already removed it (Phase 5).
+- **`lastError` is cleared on success** (noticed in Phase 4): a `SUCCEEDED` record no longer shows an old error; it stays visible in the timeline.
+- **No new `history` field**: records have had `history[]` since Phase 2 (`note` instead of `error`, which holds the error code or "replayed").
+- **The dashboard is server-rendered**: pages are server components, Replay is a server action, auto-refresh is `router.refresh()`. The key is in `.env.local` without `NEXT_PUBLIC_`, and `lib/admin-api.ts` imports `server-only`, so a browser import fails the build. A check of the built browser files found no key, URL or admin call in them.
+- **The dashboard listens on 127.0.0.1 only** (`--hostname 127.0.0.1`). It has no login of its own, and `next dev` listens on every network address by default, so anyone on the same Wi-Fi could have opened it and clicked Replay. Found on the first run. `agentRules: false` also stops `next dev` from writing an `AGENTS.md` into the project.
+- **Filters are a plain GET form**: the URL holds them, so a filtered view can be bookmarked and the page works without JavaScript. Pagination is "Next page" and "First page" (DynamoDB can't jump to page 7).
+- **Cost:** one more secret (+$0.40/month). Everything else is per request.
 
 ---
 

@@ -54,6 +54,8 @@ export class SyncWorker {
         erpRecordType: result.erpRecordType,
         erpRecordId: result.erpRecordId,
         completedAt: new Date().toISOString(),
+        // An error from an earlier attempt is history now (it stays in `history`).
+        lastError: undefined,
       });
       return { status: 'SUCCEEDED' };
     } catch (err) {

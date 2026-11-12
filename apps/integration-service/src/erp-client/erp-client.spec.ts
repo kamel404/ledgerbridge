@@ -7,6 +7,7 @@ const config: IntegrationConfig = { erpBaseUrl: BASE, erpTimeoutMs: 50, webhookT
 const secrets: SecretsProvider = {
   webhookSecret: async () => 'unused',
   erpCredentials: async () => ({ clientId: 'cid', clientSecret: 'csecret' }),
+  adminApiKey: async () => 'unused',
 };
 
 interface Call {

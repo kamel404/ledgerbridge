@@ -21,6 +21,8 @@ export interface LedgerBridgeStackProps extends cdk.StackProps {
   readonly erpBaseUrl: string;
   /** Alarm emails go here (ALARM_EMAIL in .env.aws). Optional: without it nobody is notified. */
   readonly alarmEmail?: string;
+  /** Secrets Manager secret {"apiKey": "..."} for the admin API, from `npm run aws:secrets`. */
+  readonly adminSecretName: string;
 }
 
 /** Worker Lambda timeout. The queue's visibility timeout is derived from it. */
@@ -79,6 +81,7 @@ export class LedgerBridgeStack extends cdk.Stack {
     // values never appear in a CloudFormation template. CDK only knows the names.
     const webhookSecret = secretsmanager.Secret.fromSecretNameV2(this, 'WebhookSecret', props.webhookSecretName);
     const erpSecret = secretsmanager.Secret.fromSecretNameV2(this, 'ErpSecret', props.erpSecretName);
+    const adminSecret = secretsmanager.Secret.fromSecretNameV2(this, 'AdminSecret', props.adminSecretName);
 
     // ---- Ingest Lambda ---------------------------------------------------------
     const ingest = new NestFunction(this, 'Ingest', {
@@ -202,6 +205,28 @@ export class LedgerBridgeStack extends cdk.Stack {
       }),
     );
 
+    // ---- Admin API Lambda (SPEC §8.6) --------------------------------------------
+    // Same code bundle as ingest, but its own function and role: only /admin/*
+    // reaches it, and only it may read the admin key, replay events (send to
+    // the queue) and read queue depths. The webhook Lambda gets none of that.
+    const admin = new NestFunction(this, 'Admin', {
+      app: 'integration-service',
+      entry: 'http',
+      description: 'LedgerBridge admin API for the dashboard: list, detail, replay, stats',
+      timeout: cdk.Duration.seconds(15),
+      environment: {
+        SYNC_LOG_TABLE: syncLog.tableName,
+        SYNC_QUEUE_URL: queue.queueUrl,
+        SYNC_DLQ_URL: dlq.queueUrl,
+        ADMIN_SECRET_NAME: props.adminSecretName,
+      },
+    });
+    syncLog.grantReadWriteData(admin); // includes Query on the byStatus index
+    queue.grantSendMessages(admin); // replay
+    queue.grant(admin, 'sqs:GetQueueAttributes');
+    dlq.grant(admin, 'sqs:GetQueueAttributes');
+    adminSecret.grantRead(admin);
+
     // ---- Public HTTP API -------------------------------------------------------
     const api = new apigw.HttpApi(this, 'HttpApi', {
       description: 'LedgerBridge webhooks',
@@ -210,6 +235,13 @@ export class LedgerBridgeStack extends cdk.Stack {
     const ingestIntegration = new integrations.HttpLambdaIntegration('IngestIntegration', ingest);
     api.addRoutes({ path: '/webhooks/{source}', methods: [apigw.HttpMethod.POST], integration: ingestIntegration });
     api.addRoutes({ path: '/health', methods: [apigw.HttpMethod.GET], integration: ingestIntegration });
+    // Protected by the X-Api-Key check inside the app (ApiKeyGuard).
+    const adminIntegration = new integrations.HttpLambdaIntegration('AdminIntegration', admin);
+    api.addRoutes({
+      path: '/admin/{proxy+}',
+      methods: [apigw.HttpMethod.GET, apigw.HttpMethod.POST],
+      integration: adminIntegration,
+    });
     new apigw.HttpStage(this, 'DefaultStage', {
       httpApi: api,
       stageName: '$default',
@@ -225,7 +257,7 @@ export class LedgerBridgeStack extends cdk.Stack {
       dlq,
       worker,
       csvImport,
-      functions: { ingest, worker, csvImport, dlqHandler },
+      functions: { ingest, worker, csvImport, dlqHandler, admin },
       alarmEmail: props.alarmEmail,
     });
 

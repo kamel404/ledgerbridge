@@ -1,7 +1,7 @@
 // Creates the cloud secrets LedgerBridge needs on AWS. Run once before the first deploy:
 //
-//   npm run aws:secrets             create missing values, store both secrets in Secrets Manager
-//   npm run aws:secrets -- --delete delete both Secrets Manager secrets (cleanup after `cdk destroy`)
+//   npm run aws:secrets             create missing values, store the secrets in Secrets Manager
+//   npm run aws:secrets -- --delete delete the Secrets Manager secrets (cleanup after `cdk destroy`)
 //
 // What it does:
 // 1. Creates `.env.aws` in the repo root (gitignored) with strong random values,
@@ -12,6 +12,8 @@
 //    - `ledgerbridge/webhooks` {"billing", "procurement"}: read by the ingest Lambda
 //    - `ledgerbridge/erp` {"clientId", "clientSecret"}: read by the worker Lambda
 //      to log in to the ERP. Same values the mock ERP is deployed with.
+//    - `ledgerbridge/admin` {"apiKey"}: checked by the admin Lambda; the dashboard
+//      sends it (`npm run dashboard:env` copies it into apps/dashboard/.env.local)
 //
 // Secret values are never printed. They go to the AWS CLI through a temporary
 // file (not the command line) that is deleted right after.
@@ -28,6 +30,7 @@ import { aws, loginHint } from './aws-cli.ts';
 const ENV_FILE = fileURLToPath(new URL('../.env.aws', import.meta.url));
 const WEBHOOK_SECRET_NAME = 'ledgerbridge/webhooks';
 const ERP_SECRET_NAME = 'ledgerbridge/erp';
+const ADMIN_SECRET_NAME = 'ledgerbridge/admin';
 
 const random = () => randomBytes(32).toString('base64url');
 
@@ -52,6 +55,8 @@ function ensureEnvFile(): Map<string, string> {
     WEBHOOK_SECRET_BILLING: random,
     WEBHOOK_SECRET_PROCUREMENT: random,
     ERP_SECRET_NAME: () => ERP_SECRET_NAME,
+    ADMIN_SECRET_NAME: () => ADMIN_SECRET_NAME,
+    ADMIN_API_KEY: random,
   };
   const added: string[] = [];
   for (const [key, make] of Object.entries(defaults)) {
@@ -122,11 +127,19 @@ function storeAll(values: Map<string, string>): void {
     clientId: values.get('MOCK_ERP_CLIENT_ID'),
     clientSecret: values.get('MOCK_ERP_CLIENT_SECRET'),
   });
+  storeSecret(values.get('ADMIN_SECRET_NAME')!, 'LedgerBridge admin API key (dashboard)', {
+    apiKey: values.get('ADMIN_API_KEY'),
+  });
 }
 
 function deleteAll(): void {
   const values = readEnvFile(ENV_FILE);
-  for (const name of [values.get('WEBHOOK_SECRET_NAME') ?? WEBHOOK_SECRET_NAME, values.get('ERP_SECRET_NAME') ?? ERP_SECRET_NAME]) {
+  const names = [
+    values.get('WEBHOOK_SECRET_NAME') ?? WEBHOOK_SECRET_NAME,
+    values.get('ERP_SECRET_NAME') ?? ERP_SECRET_NAME,
+    values.get('ADMIN_SECRET_NAME') ?? ADMIN_SECRET_NAME,
+  ];
+  for (const name of names) {
     if (!secretExists(name)) {
       console.log(`Secrets Manager: ${name} does not exist`);
       continue;

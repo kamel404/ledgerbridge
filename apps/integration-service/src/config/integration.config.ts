@@ -24,6 +24,10 @@ const EnvSchema = z.object({
   WEBHOOK_SECRET_NAME: z.string().min(1).optional(),
   /** Secrets Manager secret holding {"clientId": "...", "clientSecret": "..."} (Phase 4). */
   ERP_SECRET_NAME: z.string().min(1).optional(),
+  /** Secrets Manager secret holding {"apiKey": "..."} for the admin API. Unset = ADMIN_API_KEY env var. */
+  ADMIN_SECRET_NAME: z.string().min(1).optional(),
+  /** Dead-letter queue URL, for the DLQ depth on the dashboard. Unset = no queue stats. */
+  SYNC_DLQ_URL: z.url().optional(),
 });
 
 export interface IntegrationConfig {
@@ -34,6 +38,8 @@ export interface IntegrationConfig {
   syncQueueUrl?: string;
   webhookSecretName?: string;
   erpSecretName?: string;
+  adminSecretName?: string;
+  syncDlqUrl?: string;
 }
 
 export const INTEGRATION_CONFIG = Symbol('INTEGRATION_CONFIG');
@@ -54,5 +60,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): IntegrationCon
     ...(e.SYNC_QUEUE_URL && { syncQueueUrl: e.SYNC_QUEUE_URL }),
     ...(e.WEBHOOK_SECRET_NAME && { webhookSecretName: e.WEBHOOK_SECRET_NAME }),
     ...(e.ERP_SECRET_NAME && { erpSecretName: e.ERP_SECRET_NAME }),
+    ...(e.ADMIN_SECRET_NAME && { adminSecretName: e.ADMIN_SECRET_NAME }),
+    ...(e.SYNC_DLQ_URL && { syncDlqUrl: e.SYNC_DLQ_URL }),
   };
 }

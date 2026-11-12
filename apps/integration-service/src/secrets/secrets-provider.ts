@@ -23,6 +23,8 @@ export interface SecretsProvider {
   webhookSecret(source: WebhookSource): Promise<string>;
   /** OAuth client credentials for the ERP. */
   erpCredentials(): Promise<ErpCredentials>;
+  /** The key callers of /admin/* must send in X-Api-Key. */
+  adminApiKey(): Promise<string>;
 }
 
 export const SECRETS_PROVIDER = Symbol('SECRETS_PROVIDER');

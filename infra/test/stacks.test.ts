@@ -24,6 +24,7 @@ describe('LedgerBridgeStack', () => {
       erpSecretName: 'ledgerbridge/erp',
       erpBaseUrl: 'https://erp.example',
       alarmEmail: 'ops@example.com',
+      adminSecretName: 'ledgerbridge/admin',
     }),
   );
 
@@ -83,6 +84,7 @@ describe('LedgerBridgeStack', () => {
     expect(policy).not.toContain('sqs:ReceiveMessage');
     expect(policy).not.toContain('sqs:DeleteMessage');
     expect(policy).not.toContain('ErpSecret'); // ingest never talks to the ERP
+    expect(policy).not.toContain('secret:ledgerbridge/admin'); // nor serves the admin API
   });
 
   it('lets the worker consume the queue and read the ERP secret, but not send or read webhook secrets', () => {
@@ -107,6 +109,22 @@ describe('LedgerBridgeStack', () => {
         Variables: Match.objectLike({ ERP_BASE_URL: 'https://erp.example', ERP_SECRET_NAME: 'ledgerbridge/erp' }),
       },
     });
+  });
+
+  it('the admin Lambda reads the admin key and sync log, can replay and read queue depths, nothing else', () => {
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Handler: 'http.handler',
+      Environment: { Variables: Match.objectLike({ ADMIN_SECRET_NAME: 'ledgerbridge/admin', SYNC_DLQ_URL: Match.anyValue() }) },
+    });
+    const policy = policyOf('Admin');
+    expect(policy).toContain('secret:ledgerbridge/admin');
+    expect(policy).not.toContain('secret:ledgerbridge/webhooks');
+    expect(policy).not.toContain('secret:ledgerbridge/erp');
+    expect(policy).toContain('dynamodb:Query');
+    expect(policy).toContain('sqs:SendMessage');
+    expect(policy).toContain('sqs:GetQueueAttributes');
+    expect(policy).not.toContain('sqs:ReceiveMessage');
+    expect(policy).not.toContain('s3:');
   });
 
   it('the DLQ handler is triggered by the DLQ and can only touch the sync log', () => {
@@ -243,11 +261,11 @@ describe('LedgerBridgeStack', () => {
       expect(JSON.stringify(allow.Condition)).toContain(':alarm:LedgerBridge-*');
     });
 
-    it('has a dashboard and a saved "trace one event" query over all four log groups', () => {
+    it('has a dashboard and a saved "trace one event" query over all five log groups', () => {
       template.resourceCountIs('AWS::CloudWatch::Dashboard', 1);
       template.hasResourceProperties('AWS::Logs::QueryDefinition', { Name: 'LedgerBridge/Trace one event' });
       const q = Object.values(template.findResources('AWS::Logs::QueryDefinition'))[0]!.Properties;
-      expect(q.LogGroupNames).toHaveLength(4);
+      expect(q.LogGroupNames).toHaveLength(5);
       expect(q.QueryString).toContain('filter eventId =');
     });
 
@@ -255,7 +273,7 @@ describe('LedgerBridgeStack', () => {
       const fns = Object.values(template.findResources('AWS::Lambda::Function')).filter((f) =>
         /^(http|worker|csv|dlq).handler$/.test(f.Properties.Handler),
       );
-      expect(fns).toHaveLength(4);
+      expect(fns).toHaveLength(5); // ingest, worker, csv, dlq, admin
       for (const f of fns) {
         expect(f.Properties.Environment.Variables).toMatchObject({
           POWERTOOLS_SERVICE_NAME: 'ledgerbridge',
@@ -276,8 +294,10 @@ describe('LedgerBridgeStack', () => {
     });
   });
 
-  it('routes only the webhook and health paths', () => {
-    template.resourceCountIs('AWS::ApiGatewayV2::Route', 2);
+  it('routes only the webhook, health and admin paths', () => {
+    template.resourceCountIs('AWS::ApiGatewayV2::Route', 4);
+    template.hasResourceProperties('AWS::ApiGatewayV2::Route', { RouteKey: 'GET /admin/{proxy+}' });
+    template.hasResourceProperties('AWS::ApiGatewayV2::Route', { RouteKey: 'POST /admin/{proxy+}' });
     template.hasResourceProperties('AWS::ApiGatewayV2::Route', { RouteKey: 'POST /webhooks/{source}' });
     template.hasResourceProperties('AWS::ApiGatewayV2::Route', { RouteKey: 'GET /health' });
   });

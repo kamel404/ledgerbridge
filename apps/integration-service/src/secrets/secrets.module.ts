@@ -7,10 +7,11 @@ import { SECRETS_PROVIDER, type SecretsProvider } from './secrets-provider.js';
 
 /** Secrets Manager when a secret name is configured (on AWS), env vars otherwise (local). */
 function createSecretsProvider(config: IntegrationConfig): SecretsProvider {
-  if (config.webhookSecretName || config.erpSecretName) {
+  if (config.webhookSecretName || config.erpSecretName || config.adminSecretName) {
     return new SecretsManagerProvider(new SecretsManagerClient({}), {
       webhooks: config.webhookSecretName,
       erp: config.erpSecretName,
+      admin: config.adminSecretName,
     });
   }
   return new EnvSecretsProvider();

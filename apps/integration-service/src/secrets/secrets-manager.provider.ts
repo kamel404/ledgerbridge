@@ -21,14 +21,15 @@ interface CacheEntry {
  * Each secret is one JSON object, to keep the number of secrets (and their
  * monthly cost) small:
  *   ledgerbridge/webhooks  {"billing": "...", "procurement": "..."}
- *   ledgerbridge/erp       {"clientId": "...", "clientSecret": "..."}   (Phase 4)
+ *   ledgerbridge/erp       {"clientId": "...", "clientSecret": "..."}
+ *   ledgerbridge/admin     {"apiKey": "..."}
  */
 export class SecretsManagerProvider implements SecretsProvider {
   private readonly cache = new Map<string, CacheEntry>();
 
   constructor(
     private readonly client: SecretsManagerClient,
-    private readonly names: { webhooks?: string; erp?: string },
+    private readonly names: { webhooks?: string; erp?: string; admin?: string },
   ) {}
 
   async webhookSecret(source: WebhookSource): Promise<string> {
@@ -44,7 +45,12 @@ export class SecretsManagerProvider implements SecretsProvider {
     };
   }
 
-  private require(kind: 'webhooks' | 'erp'): string {
+  async adminApiKey(): Promise<string> {
+    const secret = await this.read(this.require('admin'));
+    return this.field(secret, 'apiKey', this.names.admin!);
+  }
+
+  private require(kind: 'webhooks' | 'erp' | 'admin'): string {
     const name = this.names[kind];
     if (!name) throw new Error(`No Secrets Manager secret configured for ${kind}`);
     return name;

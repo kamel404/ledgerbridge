@@ -24,6 +24,10 @@ export class EnvSecretsProvider implements SecretsProvider {
     };
   }
 
+  async adminApiKey(): Promise<string> {
+    return this.required('ADMIN_API_KEY');
+  }
+
   private required(name: string): string {
     const value = this.env[name];
     if (!value) throw new Error(`Missing secret: environment variable ${name} is not set`);
