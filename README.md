@@ -66,6 +66,22 @@ When something fails:
 
 Every status change is written to a sync log in DynamoDB, so each event has a full timeline.
 
+## The operator dashboard
+
+Live on AWS behind a login. Finance and ops use it to see what synced and to fix what didn't.
+
+**Overview:** every event of the last 24 hours by status, queue depths, and the result of last night's reconciliation.
+
+![Dashboard overview: 232 events succeeded, nothing failed or dead, queues empty, reconciliation found no mismatches](docs/screenshots/overview.png)
+
+**A dead event:** the error, every attempt on the timeline, the original payload, and the Replay button.
+
+![Detail of a DEAD invoice event: the ERP returned 503 four times, the timeline shows each retry, and a Replay button sends it back to the queue](docs/screenshots/sync-detail.png)
+
+**Syncs:** every event, newest first, with filters and search by invoice or bill number.
+
+![Syncs list with status, flow, event type, business key and attempts for each event](docs/screenshots/syncs.png)
+
 ## What's in the repo
 
 ```

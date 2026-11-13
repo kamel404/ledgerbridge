@@ -607,7 +607,7 @@ Automated, no AWS: `npm run test:e2e -w integration-service` (`test/admin.e2e-sp
 - [x] Contract test: the ERP client's requests match the mock's routes
 - [x] Coverage ≥ 80% on `flows/` and `erp-client/` (`npm run test:cov -w integration-service` enforces it)
 - [x] `.github/workflows/ci.yml` (lint, typecheck, test). Deploy workflow dropped: the project SCP denies `iam:*Provider*`, so no GitHub OIDC role; deploys stay `npm run deploy` from a laptop
-- [ ] `README.md`: what it is, diagram, deploy, simulator, screenshots (still missing), "How this maps to real NetSuite"
+- [x] `README.md`: what it is, diagram, deploy, simulator, screenshots, "How this maps to real NetSuite"
 - [x] `docs/RUNBOOK.md`: per alarm: meaning, the Logs Insights query, how to fix and replay
 - [x] `docs/ADDING_AN_INTEGRATION.md`: schema → mapper → handler → secret → tests
 
