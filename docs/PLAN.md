@@ -596,7 +596,7 @@ Automated, no AWS: `npm run test:e2e -w integration-service` (`test/admin.e2e-sp
 
 - **Why reconcile when everything says SUCCEEDED:** someone might delete or edit a record directly in the ERP, a bug might write the wrong thing, or a write might succeed on the ERP side while our log update failed. Finance needs both sides to agree. Reconciliation compares them.
 - **EventBridge schedule:** a cron rule (`cron(0 2 * * ? *)` = 02:00 UTC daily) that calls the reconcile Lambda.
-- **GitHub Actions:** YAML in `.github/workflows/` that GitHub runs on each push: install, lint, typecheck, test. The deploy job is manual (`workflow_dispatch`) and needs AWS credentials. Use GitHub's OIDC connection to AWS (a role GitHub can assume) rather than storing access keys in GitHub.
+- **GitHub Actions:** YAML in `.github/workflows/` that GitHub runs on each push: install, lint, typecheck, test. The deploy job is manual (`workflow_dispatch`) and needs AWS credentials. (Planned: a manual deploy job using GitHub OIDC. Not possible in this AWS project, see the task list.)
 
 ### Tasks
 
@@ -606,10 +606,10 @@ Automated, no AWS: `npm run test:e2e -w integration-service` (`test/admin.e2e-sp
 - [x] Simulator `load --count 200` (retries 429/5xx like a real webhook sender)
 - [x] Contract test: the ERP client's requests match the mock's routes
 - [x] Coverage ≥ 80% on `flows/` and `erp-client/` (`npm run test:cov -w integration-service` enforces it)
-- [ ] `.github/workflows/ci.yml` (lint, typecheck, test) and a manual deploy workflow
-- [ ] `README.md`: what it is, diagram, deploy, simulator, screenshots, "How this maps to real NetSuite"
-- [ ] `docs/RUNBOOK.md`: per alarm: meaning, the Logs Insights query, how to fix and replay
-- [ ] `docs/ADDING_AN_INTEGRATION.md`: schema → mapper → handler → secret → tests
+- [x] `.github/workflows/ci.yml` (lint, typecheck, test). Deploy workflow dropped: the project SCP denies `iam:*Provider*`, so no GitHub OIDC role; deploys stay `npm run deploy` from a laptop
+- [ ] `README.md`: what it is, diagram, deploy, simulator, screenshots (still missing), "How this maps to real NetSuite"
+- [x] `docs/RUNBOOK.md`: per alarm: meaning, the Logs Insights query, how to fix and replay
+- [x] `docs/ADDING_AN_INTEGRATION.md`: schema → mapper → handler → secret → tests
 
 ### Done when
 

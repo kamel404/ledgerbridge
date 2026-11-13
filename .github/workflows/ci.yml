@@ -1,0 +1,43 @@
+# Runs on every push and pull request: lint, typecheck, unit tests, end-to-end
+# tests and the coverage gate. Needs no AWS access and no secrets.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24 # same major as the Lambda runtime
+          cache: npm
+
+      - run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+      - name: End-to-end tests (service against the mock ERP, in memory)
+        run: npm run test:e2e
+
+      - name: Coverage gate (flows/ and erp-client/ >= 80%)
+        run: npm run test:cov -w integration-service

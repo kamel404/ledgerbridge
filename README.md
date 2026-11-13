@@ -1,5 +1,7 @@
 # LedgerBridge
 
+[![CI](https://github.com/kamel404/ledgerbridge/actions/workflows/ci.yml/badge.svg)](https://github.com/kamel404/ledgerbridge/actions/workflows/ci.yml)
+
 **An integration hub that moves invoices, payments and vendor bills from business apps into an ERP, automatically and without duplicates.**
 
 Built with NestJS and Next.js on AWS serverless. The ERP is a mock that copies NetSuite's REST API, so the integration code is written the way it would be against the real thing.
@@ -144,6 +146,10 @@ npm run dashboard:env && npm run dashboard      # dashboard against the deployed
 
 `npm run destroy` removes everything. Idle cost is about $1.20 a month (three secrets); the rest is billed per request.
 
+### CI
+
+Every push and pull request runs [`ci.yml`](.github/workflows/ci.yml) on GitHub Actions: lint, typecheck, unit and end-to-end tests, coverage gate. Deploys stay manual (`npm run deploy` from your machine): this AWS project's managed service control policy doesn't allow OIDC identity providers, so GitHub can't sign in to AWS without stored keys.
+
 More detail: [infra/README.md](infra/README.md).
 
 ## Tests
@@ -181,16 +187,12 @@ The mock is a learning aid, not a certified copy of NetSuite.
 
 ## Status
 
-Working today: both flows, CSV import, retries and dead-letter handling, monitoring and alarms, the admin API, and the dashboard with replay.
-
-Not built yet:
-
-- Nightly reconciliation that compares the sync log with the ERP
-- CI with GitHub Actions
-- A runbook and a guide for adding a new integration
+Working today: both flows, CSV import, retries and dead-letter handling, monitoring and alarms, nightly reconciliation, the admin API, the dashboard with replay (live on AWS behind a login), and CI with GitHub Actions.
 
 ## Further reading
 
+- [docs/RUNBOOK.md](docs/RUNBOOK.md): what to do for each alarm
+- [docs/ADDING_AN_INTEGRATION.md](docs/ADDING_AN_INTEGRATION.md): adding a new event type, step by step
 - [SPEC.md](SPEC.md): the full requirements
 - [docs/PLAN.md](docs/PLAN.md): the build plan, with the reasoning behind each design decision
 - [apps/integration-service/README.md](apps/integration-service/README.md): code map and how to add an event type
