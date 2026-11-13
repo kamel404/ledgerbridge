@@ -1,4 +1,5 @@
 import { AdminApiError, adminApi, syncsQuery } from './admin-api';
+import { resetSettingsCache } from './settings';
 
 function fakeFetch(status: number, body: unknown) {
   return vi.fn(async (_url: string | URL | Request, _init?: RequestInit) =>
@@ -10,6 +11,7 @@ describe('admin API client', () => {
   beforeEach(() => {
     vi.stubEnv('ADMIN_API_URL', 'https://api.example/');
     vi.stubEnv('ADMIN_API_KEY', 'k3y');
+    resetSettingsCache();
   });
   afterEach(() => vi.unstubAllEnvs());
 
@@ -36,6 +38,7 @@ describe('admin API client', () => {
 
   it('explains what to do when not configured', async () => {
     vi.stubEnv('ADMIN_API_KEY', '');
+    resetSettingsCache();
     await expect(adminApi.stats(fakeFetch(200, {}))).rejects.toThrow('npm run dashboard:env');
   });
 

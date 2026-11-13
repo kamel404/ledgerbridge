@@ -7,13 +7,16 @@
 // 1. Creates `.env.aws` in the repo root (gitignored) with strong random values,
 //    keeping any values already there. The simulator signs webhooks with these,
 //    and CDK reads the mock ERP's values from it.
-// 2. Stores two JSON secrets in Secrets Manager (creates them, or updates
+// 2. Stores these JSON secrets in Secrets Manager (creates them, or updates
 //    them if they exist):
 //    - `ledgerbridge/webhooks` {"billing", "procurement"}: read by the ingest Lambda
 //    - `ledgerbridge/erp` {"clientId", "clientSecret"}: read by the worker Lambda
 //      to log in to the ERP. Same values the mock ERP is deployed with.
 //    - `ledgerbridge/admin` {"apiKey"}: checked by the admin Lambda; the dashboard
 //      sends it (`npm run dashboard:env` copies it into apps/dashboard/.env.local)
+//    - `ledgerbridge/dashboard` {"password", "sessionKey"}: the deployed dashboard's
+//      login password (DASHBOARD_PASSWORD in .env.aws) and the key that signs its
+//      session cookie. Change either in .env.aws and re-run to rotate.
 //
 // Secret values are never printed. They go to the AWS CLI through a temporary
 // file (not the command line) that is deleted right after.
@@ -31,6 +34,7 @@ const ENV_FILE = fileURLToPath(new URL('../.env.aws', import.meta.url));
 const WEBHOOK_SECRET_NAME = 'ledgerbridge/webhooks';
 const ERP_SECRET_NAME = 'ledgerbridge/erp';
 const ADMIN_SECRET_NAME = 'ledgerbridge/admin';
+const DASHBOARD_SECRET_NAME = 'ledgerbridge/dashboard';
 
 const random = () => randomBytes(32).toString('base64url');
 
@@ -57,6 +61,9 @@ function ensureEnvFile(): Map<string, string> {
     ERP_SECRET_NAME: () => ERP_SECRET_NAME,
     ADMIN_SECRET_NAME: () => ADMIN_SECRET_NAME,
     ADMIN_API_KEY: random,
+    DASHBOARD_SECRET_NAME: () => DASHBOARD_SECRET_NAME,
+    DASHBOARD_PASSWORD: () => randomBytes(18).toString('base64url'), // 24 characters
+    DASHBOARD_SESSION_KEY: random,
   };
   const added: string[] = [];
   for (const [key, make] of Object.entries(defaults)) {
@@ -130,6 +137,10 @@ function storeAll(values: Map<string, string>): void {
   storeSecret(values.get('ADMIN_SECRET_NAME')!, 'LedgerBridge admin API key (dashboard)', {
     apiKey: values.get('ADMIN_API_KEY'),
   });
+  storeSecret(values.get('DASHBOARD_SECRET_NAME')!, 'LedgerBridge dashboard login password and session-cookie key', {
+    password: values.get('DASHBOARD_PASSWORD'),
+    sessionKey: values.get('DASHBOARD_SESSION_KEY'),
+  });
 }
 
 function deleteAll(): void {
@@ -138,6 +149,7 @@ function deleteAll(): void {
     values.get('WEBHOOK_SECRET_NAME') ?? WEBHOOK_SECRET_NAME,
     values.get('ERP_SECRET_NAME') ?? ERP_SECRET_NAME,
     values.get('ADMIN_SECRET_NAME') ?? ADMIN_SECRET_NAME,
+    values.get('DASHBOARD_SECRET_NAME') ?? DASHBOARD_SECRET_NAME,
   ];
   for (const name of names) {
     if (!secretExists(name)) {

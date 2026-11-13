@@ -12,6 +12,11 @@ export function lambdaBundle(app: 'mock-erp' | 'integration-service'): lambda.Co
   return lambda.Code.fromAsset(path.join(REPO_ROOT, 'apps', app, 'dist-lambda'));
 }
 
+/** Folder of a Web Function package (`npm run build:lambda -w dashboard` creates apps/dashboard/dist-web). */
+export function webBundle(app: 'dashboard'): string {
+  return path.join(REPO_ROOT, 'apps', app, 'dist-web');
+}
+
 export interface NestFunctionProps {
   readonly app: 'mock-erp' | 'integration-service';
   /** Entry file in dist-lambda, e.g. "http" -> handler "http.handler". */

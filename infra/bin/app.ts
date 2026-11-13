@@ -43,6 +43,7 @@ new LedgerBridgeStack(app, 'LedgerBridgeStack', {
   webhookSecretName: required('WEBHOOK_SECRET_NAME'),
   erpSecretName: required('ERP_SECRET_NAME'),
   adminSecretName: required('ADMIN_SECRET_NAME'),
+  dashboardSecretName: required('DASHBOARD_SECRET_NAME'),
   // The worker talks to the mock ERP. Pointing at a real NetSuite = pass its URL instead.
   erpBaseUrl: mockErp.url,
   // Optional: set ALARM_EMAIL in .env.aws to get alarm emails.

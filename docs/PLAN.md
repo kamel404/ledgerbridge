@@ -603,9 +603,9 @@ Automated, no AWS: `npm run test:e2e -w integration-service` (`test/admin.e2e-sp
 - [x] `lambda/reconcile.ts`: last 24 h `SUCCEEDED` records vs SuiteQL for invoices, payments, bills in the same window; list missing on either side
 - [x] Publish `ReconciliationMismatches` metric + alarm; store a summary item for the dashboard Overview
 - [x] EventBridge Scheduler at 02:00 UTC (plus `npm run reconcile` to run it by hand, and `npm run simulate -- reconcile --aws`)
-- [ ] Simulator `load --count 200`
-- [ ] Contract test: the ERP client's requests match the mock's routes
-- [ ] Coverage ≥ 80% on `flows/` and `erp-client/`
+- [x] Simulator `load --count 200` (retries 429/5xx like a real webhook sender)
+- [x] Contract test: the ERP client's requests match the mock's routes
+- [x] Coverage ≥ 80% on `flows/` and `erp-client/` (`npm run test:cov -w integration-service` enforces it)
 - [ ] `.github/workflows/ci.yml` (lint, typecheck, test) and a manual deploy workflow
 - [ ] `README.md`: what it is, diagram, deploy, simulator, screenshots, "How this maps to real NetSuite"
 - [ ] `docs/RUNBOOK.md`: per alarm: meaning, the Logs Insights query, how to fix and replay

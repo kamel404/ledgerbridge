@@ -3,7 +3,9 @@ import apigw from 'aws-cdk-lib/aws-apigatewayv2';
 import integrations from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import iam from 'aws-cdk-lib/aws-iam';
+import lambda from 'aws-cdk-lib/aws-lambda';
 import { SqsEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
+import logs from 'aws-cdk-lib/aws-logs';
 import s3 from 'aws-cdk-lib/aws-s3';
 import s3n from 'aws-cdk-lib/aws-s3-notifications';
 import scheduler from 'aws-cdk-lib/aws-scheduler';
@@ -12,7 +14,7 @@ import secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import sqs from 'aws-cdk-lib/aws-sqs';
 import type { Construct } from 'constructs';
 import { Monitoring } from './monitoring.ts';
-import { NestFunction } from './shared.ts';
+import { NestFunction, webBundle } from './shared.ts';
 
 export interface LedgerBridgeStackProps extends cdk.StackProps {
   /** Secrets Manager secret {"billing": "...", "procurement": "..."}, created by `npm run aws:secrets`. */
@@ -25,6 +27,8 @@ export interface LedgerBridgeStackProps extends cdk.StackProps {
   readonly alarmEmail?: string;
   /** Secrets Manager secret {"apiKey": "..."} for the admin API, from `npm run aws:secrets`. */
   readonly adminSecretName: string;
+  /** Secrets Manager secret {"password": "...", "sessionKey": "..."} for the dashboard login, from `npm run aws:secrets`. */
+  readonly dashboardSecretName: string;
 }
 
 /** Worker Lambda timeout. The queue's visibility timeout is derived from it. */
@@ -292,6 +296,36 @@ export class LedgerBridgeStack extends cdk.Stack {
       throttle: { rateLimit: 20, burstLimit: 40 },
     });
 
+    // ---- Operator dashboard: Lambda Web Function (SPEC §9) -------------------------
+    // The Next.js app (apps/dashboard) runs as its own Node server on a Web
+    // Function, which gives it an HTTPS URL and scales to zero when unused.
+    // The endpoint is public (APPLICATION_MANAGED): the app itself requires the
+    // dashboard password (apps/dashboard/proxy.ts). It reads the admin key and
+    // the login secret from Secrets Manager at runtime, so neither is in this
+    // template, and calls the admin API like the local dashboard does.
+    const dashboardSecret = secretsmanager.Secret.fromSecretNameV2(this, 'DashboardSecret', props.dashboardSecretName);
+    const dashboard = new lambda.WebFunction(this, 'Dashboard', {
+      code: lambda.WebFunctionCode.fromAssetToManagedBucket(webBundle('dashboard')),
+      runtime: lambda.WebFunctionRuntime.NODEJS_24_X,
+      revisionDescription: 'LedgerBridge operator dashboard (Next.js)',
+      defaultEndpointAuth: lambda.WebFunctionAuthType.APPLICATION_MANAGED,
+      // One operator: 2 environments (the lowest allowed) caps cost if the URL gets hammered.
+      defaultEndpoint: { maxEnvironments: 2 },
+      timeout: cdk.Duration.seconds(30),
+      environment: {
+        NODE_ENV: 'production',
+        ADMIN_API_URL: api.apiEndpoint,
+        ADMIN_SECRET_NAME: props.adminSecretName,
+        DASHBOARD_SECRET_NAME: props.dashboardSecretName,
+      },
+      logGroup: new logs.LogGroup(this, 'DashboardLogs', {
+        retention: logs.RetentionDays.ONE_WEEK,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      }),
+    });
+    adminSecret.grantRead(dashboard);
+    dashboardSecret.grantRead(dashboard);
+
     // ---- Alarms, dashboard, saved log query (SPEC §11) ------------------------------
     new Monitoring(this, 'Monitoring', {
       queue,
@@ -304,6 +338,10 @@ export class LedgerBridgeStack extends cdk.Stack {
     });
 
     new cdk.CfnOutput(this, 'ApiUrl', { value: api.apiEndpoint, description: 'Send webhooks to <ApiUrl>/webhooks/<source>' });
+    new cdk.CfnOutput(this, 'WebDashboardUrl', {
+      value: `https://${dashboard.endpoint.domainName}`,
+      description: 'The operator dashboard (password: DASHBOARD_PASSWORD in .env.aws)',
+    });
     new cdk.CfnOutput(this, 'SyncQueueUrl', { value: queue.queueUrl });
     new cdk.CfnOutput(this, 'SyncDlqUrl', { value: dlq.queueUrl });
     new cdk.CfnOutput(this, 'SyncLogTableName', { value: syncLog.tableName });

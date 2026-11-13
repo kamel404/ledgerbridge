@@ -13,7 +13,7 @@
   "scripts": {
     "build:shared": "npm run build -w @ledgerbridge/shared",
     "build": "npm run build:shared && npm run build -w mock-erp -w integration-service",
-    "build:lambda": "npm run build:shared && npm run build:lambda -w mock-erp -w integration-service",
+    "build:lambda": "npm run build:shared && npm run build:lambda -w mock-erp -w integration-service -w dashboard",
     "typecheck": "npm run build:shared && npm run typecheck --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",
     "test": "npm run build:shared && npm run test --workspaces --if-present",

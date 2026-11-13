@@ -17,6 +17,9 @@
 //   npm run simulate -- csv --aws         uploads a vendor-bill CSV with some bad rows to the
 //                                         import bucket; checks the bills, the errors file,
 //                                         then uploads it again (nothing new may appear)
+//   npm run simulate -- load --aws        200 events (3 invoices : 1 bill) sent 10 at a time;
+//     [--count 200]                       reports reply times, time until all are final,
+//                                         final statuses, and checks one ERP record each
 //   npm run simulate -- reconcile --aws   syncs an invoice, deletes it in the ERP, runs
 //                                         reconciliation (flagged), re-sends it, runs again (clean)
 //
@@ -82,7 +85,8 @@ const INTEGRATION_URL = (
 const ERP_URL = (deployed?.erpUrl ?? env.ERP_BASE_URL ?? 'http://localhost:3001').replace(/\/+$/, '');
 
 const delayArg = args.indexOf('--delay');
-const DELAY_MS = delayArg >= 0 ? Number(args[delayArg + 1]) : 200;
+// `load --aws` sends as fast as it can by default: the queue absorbs the burst.
+const DELAY_MS = delayArg >= 0 ? Number(args[delayArg + 1]) : args.includes('load') && ON_AWS ? 0 : 200;
 if (!Number.isFinite(DELAY_MS) || DELAY_MS < 0) {
   console.error('--delay needs a number of milliseconds');
   process.exit(2);
@@ -825,6 +829,111 @@ async function reconcile(): Promise<boolean> {
   return ok;
 }
 
+/** How many ERP records of a type have an external ID starting with `prefix` (one SuiteQL range query). */
+async function erpCountPrefix(token: string, type: string, prefix: string): Promise<number> {
+  // '.' sorts right after '-', so [prefix, prefix-with-last-'-'-as-'.') is "starts with prefix".
+  const upper = `${prefix.slice(0, -1)}.`;
+  const res = await erpFetch(`${ERP_URL}/services/rest/query/v1/suiteql?limit=1`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, Prefer: 'transient', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ q: `SELECT id FROM ${type} WHERE externalid >= '${prefix}' AND externalid < '${upper}'` }),
+  });
+  if (!res.ok) throw new Error(`SuiteQL failed: ${res.status} ${await res.text()}`);
+  return ((await res.json()) as { totalResults: number }).totalResults;
+}
+
+const percentile = (sorted: number[], p: number) => sorted[Math.min(sorted.length - 1, Math.floor((p / 100) * sorted.length))] ?? 0;
+
+/**
+ * A burst of events (PLAN Phase 8). On AWS: sent 10 at a time with no pause,
+ * so API Gateway, the queue, 5 workers at most and the ERP's rate limit (25/s)
+ * all come into play. Events the ERP rate-limits are retried, so everything
+ * should still end SUCCEEDED, once each.
+ *
+ * Locally there's no queue: each webhook waits for the ERP, so events are sent
+ * one by one (with --delay) and it's a much smaller test.
+ */
+async function load(): Promise<boolean> {
+  const countArg = args.indexOf('--count');
+  const count = countArg >= 0 ? Number(args[countArg + 1]) : 200;
+  if (!Number.isInteger(count) || count < 1 || count > 2000) {
+    console.error('--count needs a whole number between 1 and 2000');
+    return false;
+  }
+  const concurrency = ON_AWS ? 10 : 1;
+  const items = Array.from({ length: count }, (_, i) =>
+    i % 4 === 3
+      ? { source: 'procurement' as const, event: makeBill(i).event }
+      : { source: 'billing' as const, event: makeInvoice(i).event },
+  );
+  const invoices = items.filter((x) => x.source === 'billing').length;
+  const bills = count - invoices;
+  console.log(`Run ${RUN}: ${count} events (${invoices} invoices, ${bills} bills), ${concurrency} at a time, to ${INTEGRATION_URL}`);
+
+  // Like a real webhook sender (Stripe, GitHub, ...): a 429 or 5xx means "not
+  // accepted, try again later", so retry with growing waits (1, 2, 4, 8 s + jitter).
+  // A retried event keeps its ID, so if a reply was lost after all, the ingest
+  // dedup answers 200 duplicate instead of queueing it twice.
+  let retriedSends = 0;
+  const sendWithRetry = async (source: Source, event: Json): Promise<SendResult> => {
+    for (let attempt = 1; ; attempt++) {
+      const res = await send(source, event);
+      const accepted = res.status === 202 || (res.status === 200 && res.body.duplicate === true);
+      if (accepted || attempt === 5 || (res.status !== 429 && res.status < 500)) {
+        return accepted ? { ...res, status: 202 } : res;
+      }
+      retriedSends++;
+      await sleep(1000 * 2 ** (attempt - 1) + Math.random() * 500);
+    }
+  };
+
+  // Send with a small pool of parallel senders.
+  const started = performance.now();
+  const replies = new Map<string, SendResult>();
+  const latencies: number[] = [];
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: concurrency }, async () => {
+      while (next < items.length) {
+        const { source, event } = items[next++]!;
+        const t = performance.now();
+        replies.set(String(event.id), await sendWithRetry(source, event));
+        latencies.push(performance.now() - t);
+      }
+    }),
+  );
+  const sentSeconds = (performance.now() - started) / 1000;
+  latencies.sort((a, b) => a - b);
+  const accepted = [...replies.values()].filter((r) => r.status === 202).length;
+  let ok = check(accepted === count, 'accepted (202)', `${accepted} of ${count}`);
+  for (const [id, r] of replies) if (r.status !== 202) console.log(`         ${id}: ${r.status} ${JSON.stringify(r.body)}`);
+  console.log(
+    `  sent in ${sentSeconds.toFixed(1)} s (${(count / sentSeconds).toFixed(1)} events/s); ` +
+      `reply time p50 ${Math.round(percentile(latencies, 50))} ms, p95 ${Math.round(percentile(latencies, 95))} ms, max ${Math.round(latencies.at(-1) ?? 0)} ms`,
+  );
+  if (retriedSends) {
+    console.log(`  ${retriedSends} send(s) got 429/5xx and were retried (on AWS: usually Lambda's concurrency limit)`);
+  }
+
+  const states = await settle([...replies.keys()], replies, 150_000 + count * 1000);
+  const totalSeconds = (performance.now() - started) / 1000;
+  const ids = [...replies.keys()];
+  ok = reportGroup('final', ids, states) && ok;
+  const retried = ids.filter((id) => (states.get(id)?.attempts ?? 1) > 1).length;
+  console.log(
+    `  all final ${totalSeconds.toFixed(1)} s after the first send (${(count / totalSeconds).toFixed(1)} events/s end to end); ` +
+      `${retried} needed more than one try`,
+  );
+
+  const token = await erpToken();
+  const [erpInvoices, erpBills] = await Promise.all([
+    erpCountPrefix(token, 'invoice', `INV-${RUN}-`),
+    erpCountPrefix(token, 'vendorBill', `BILL-${RUN}-`),
+  ]);
+  ok = check(erpInvoices === invoices && erpBills === bills, 'one ERP record per event', `${erpInvoices} invoices, ${erpBills} bills`) && ok;
+  return ok;
+}
+
 const COMMANDS: Record<string, () => Promise<boolean>> = {
   happy,
   one,
@@ -836,13 +945,14 @@ const COMMANDS: Record<string, () => Promise<boolean>> = {
   dead,
   outage,
   csv,
+  load,
   reconcile,
 };
 
-const command = args.find((a, i) => !a.startsWith('--') && args[i - 1] !== '--delay');
+const command = args.find((a, i) => !a.startsWith('--') && args[i - 1] !== '--delay' && args[i - 1] !== '--count');
 const run = command ? COMMANDS[command] : undefined;
 if (!run) {
-  console.error(`Usage: npm run simulate -- <${Object.keys(COMMANDS).join('|')}> [--aws] [--delay <ms>]`);
+  console.error(`Usage: npm run simulate -- <${Object.keys(COMMANDS).join('|')}> [--aws] [--delay <ms>] [--count <n>]`);
   process.exit(2);
 }
 try {

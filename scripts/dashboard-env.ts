@@ -6,6 +6,8 @@
 //                                    key ADMIN_API_KEY from the root .env)
 //
 // The file is git-ignored and only read by the Next.js server. The key is never printed.
+// It also turns the login page off (DASHBOARD_AUTH=off) for the local dev server.
+// The deployed dashboard never sees this file (scripts/package-web.mjs leaves it out).
 
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -56,6 +58,9 @@ writeFileSync(
     '# Made by `npm run dashboard:env`. Git-ignored; read only by the Next.js server.',
     `ADMIN_API_URL=${url}`,
     `ADMIN_API_KEY=${key}`,
+    '# No login page on your machine: `npm run dashboard` only listens on 127.0.0.1.',
+    '# The deployed dashboard ignores this file and always asks for its password.',
+    'DASHBOARD_AUTH=off',
     '',
   ].join('\n'),
   { mode: 0o600 },

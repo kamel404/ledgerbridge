@@ -1,4 +1,5 @@
 import 'server-only';
+import { loadSettings } from './settings';
 import type { Stats, SyncFilters, SyncPage, SyncRecord } from './types';
 
 // The admin API client. `server-only` makes the build fail if this file is
@@ -21,9 +22,9 @@ interface AdminConfig {
   apiKey: string;
 }
 
-function config(env: NodeJS.ProcessEnv = process.env): AdminConfig {
-  const baseUrl = env.ADMIN_API_URL?.replace(/\/+$/, '');
-  const apiKey = env.ADMIN_API_KEY;
+/** URL from ADMIN_API_URL; key from ADMIN_API_KEY locally, or Secrets Manager on AWS (lib/settings.ts). */
+async function config(): Promise<AdminConfig> {
+  const { adminApiUrl: baseUrl, adminApiKey: apiKey } = await loadSettings();
   if (!baseUrl || !apiKey) {
     throw new AdminApiError(
       500,
@@ -34,7 +35,7 @@ function config(env: NodeJS.ProcessEnv = process.env): AdminConfig {
 }
 
 async function call<T>(method: 'GET' | 'POST', path: string, fetchFn: typeof fetch = fetch): Promise<T> {
-  const { baseUrl, apiKey } = config();
+  const { baseUrl, apiKey } = await config();
   let res: Response;
   try {
     res = await fetchFn(`${baseUrl}${path}`, {

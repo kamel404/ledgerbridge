@@ -2,6 +2,7 @@
 
 import { revalidatePath } from 'next/cache';
 import { AdminApiError, adminApi } from '@/lib/admin-api';
+import { isSignedIn } from '@/lib/auth';
 import { syncHref } from '@/lib/format';
 
 export interface ReplayState {
@@ -15,6 +16,8 @@ export interface ReplayState {
  * comes from this site's own pages before running an action.)
  */
 export async function replayAction(eventId: string, _prev: ReplayState, _form: FormData): Promise<ReplayState> {
+  // Checked here as well as in proxy.ts: this is the one action that changes data.
+  if (!(await isSignedIn())) return { ok: false, message: 'Your session has expired. Sign in again.' };
   try {
     await adminApi.replay(eventId);
   } catch (err) {

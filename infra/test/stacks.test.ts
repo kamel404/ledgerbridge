@@ -13,6 +13,11 @@ for (const app of ['mock-erp', 'integration-service']) {
   mkdirSync(dir, { recursive: true });
   writeFileSync(path.join(dir, '.keep'), '');
 }
+{
+  const dir = path.join(REPO_ROOT, 'apps', 'dashboard', 'dist-web');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(path.join(dir, '.keep'), '');
+}
 
 const env = { account: '123456789012', region: 'eu-north-1' };
 
@@ -25,8 +30,17 @@ describe('LedgerBridgeStack', () => {
       erpBaseUrl: 'https://erp.example',
       alarmEmail: 'ops@example.com',
       adminSecretName: 'ledgerbridge/admin',
+      dashboardSecretName: 'ledgerbridge/dashboard',
     }),
   );
+
+  it('runs the dashboard as a Web Function whose secrets are names, not values', () => {
+    template.resourceCountIs('AWS::Lambda::WebFunction', 1);
+    const json = JSON.stringify(template.findResources('AWS::Lambda::WebFunctionRevision'));
+    expect(json).toContain('"ADMIN_SECRET_NAME":"ledgerbridge/admin"');
+    expect(json).toContain('"DASHBOARD_SECRET_NAME":"ledgerbridge/dashboard"');
+    expect(json).not.toMatch(/ADMIN_API_KEY|DASHBOARD_PASSWORD|DASHBOARD_SESSION_KEY|DASHBOARD_AUTH/);
+  });
 
   it('moves a message to the DLQ after 4 failed receives', () => {
     template.hasResourceProperties('AWS::SQS::Queue', {

@@ -95,6 +95,9 @@ input[type='search'] { min-width: 240px; }
 button { cursor: pointer; }
 button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
 button:disabled { opacity: .6; cursor: wait; }
+button.link { background: none; border: none; padding: 0; color: var(--accent); font: inherit; cursor: pointer; }
+.login { max-width: 360px; display: flex; flex-direction: column; gap: 12px; }
+.login label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
 .pager { display: flex; gap: 16px; margin-top: 12px; }
 
 .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
